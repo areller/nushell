@@ -1,1315 +1,908 @@
-#[cfg(feature = "which")]
-use nu_test_support::fs::Stub::FileWithContent;
+use itertools::Itertools;
 use nu_test_support::fs::Stub::FileWithContentToBeTrimmed;
-use nu_test_support::nu;
-use nu_test_support::pipeline;
 use nu_test_support::playground::Playground;
+use nu_test_support::prelude::*;
+use pretty_assertions::{assert_eq, assert_matches};
+use rstest::rstest;
+
+const NU_RUNNER: &str = "let commands = $in; nu -n -c $commands | complete";
 
 #[test]
-fn takes_rows_of_nu_value_strings_and_pipes_it_to_stdin_of_external() {
-    Playground::setup("internal_to_external_pipe_test_1", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
-            "nu_times.csv",
-            r#"
-                name,rusty_luck,origin
-                Jason,1,Canada
-                Jonathan,1,New Zealand
-                Andrés,1,Ecuador
-                AndKitKatz,1,Estados Unidos
-            "#,
-        )]);
+#[deps(TESTBIN_CHOP, TESTBIN_COCOCO)]
+fn takes_rows_of_nu_value_strings_and_pipes_it_to_stdin_of_external() -> Result {
+    let code = r###"
+        [
+            [name rusty_luck origin];
+            [Jason 1 Canada]
+            [JT 1 "New Zealand"]
+            [Andres 1 Ecuador]
+            [AndKitKatz 1 "Estados Unidos"]
+        ]
+        | get origin
+        | each {|it| cococo $it | chop}
+        | get 2
+    "###;
 
-        let actual = nu!(
-        cwd: dirs.test(), pipeline(
-        r#"
-            open nu_times.csv
-            | get origin
-            | each { ^echo $it | nu --testbin chop | lines }
-            | nth 2
-            "#
-        ));
-
-        // chop will remove the last escaped double quote from \"Estados Unidos\"
-        assert_eq!(actual.out, "Ecuado");
-    })
+    // chop removes the last character from Ecuador.
+    test().run(code).expect_value_eq("Ecuado")
 }
 
 #[test]
-fn treats_dot_dot_as_path_not_range() {
+fn treats_dot_dot_as_path_not_range() -> Result {
     Playground::setup("dot_dot_dir", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
+        sandbox.with_files(&[FileWithContentToBeTrimmed(
             "nu_times.csv",
-            r#"
+            "
                 name,rusty_luck,origin
                 Jason,1,Canada
-            "#,
+            ",
         )]);
 
-        let actual = nu!(
-        cwd: dirs.test(), pipeline(
-        r#"
-            mkdir temp;
-            cd temp;
-            echo (open ../nu_times.csv).name | autoview;
-            cd ..;
-            rmdir temp
-            "#
-        ));
+        let code = "
+            mkdir temp
+            cd temp
+            let name = (open ../nu_times.csv).name.0
+            cd ..
+            rm temp
+            $name
+        ";
 
-        // chop will remove the last escaped double quote from \"Estados Unidos\"
-        assert_eq!(actual.out, "Jason");
+        test().cwd(dirs.test()).run(code).expect_value_eq("Jason")
     })
 }
 
 #[test]
-fn tags_dont_persist_through_column_path() {
-    Playground::setup("dot_dot_dir", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
-            "nu_times.csv",
-            r#"
-                name,rusty_luck,origin
-                Jason,1,Canada
-            "#,
-        )]);
-
-        let actual = nu!(
-        cwd: dirs.test(), pipeline(
-        r#"
-            mkdir temp;
-            cd temp;
-            let x = (open ../nu_times.csv).name;
-            $x | tags | get anchor | autoview;
-            cd ..;
-            rmdir temp
-            "#
-        ));
-
-        // chop will remove the last escaped double quote from \"Estados Unidos\"
-        assert!(actual.err.contains("isn't a column"));
-    })
+#[deps(TESTBIN_COCOCO)]
+fn subexpression_properly_redirects() -> Result {
+    test()
+        .run(r#"echo (cococo "hello") | str join"#)
+        .expect_value_eq("hello")
 }
 
 #[test]
-fn tags_persist_through_vars() {
-    Playground::setup("dot_dot_dir", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
-            "nu_times.csv",
-            r#"
-                name,rusty_luck,origin
-                Jason,1,Canada
-            "#,
-        )]);
-
-        let actual = nu!(
-        cwd: dirs.test(), pipeline(
-        r#"
-            mkdir temp;
-            cd temp;
-            let x = (open ../nu_times.csv);
-            $x | tags | get anchor.file | autoview;
-            cd ..;
-            rmdir temp
-            "#
-        ));
-
-        // chop will remove the last escaped double quote from \"Estados Unidos\"
-        assert!(actual.out.contains("nu_times.csv"));
-    })
+fn argument_subexpression() -> Result {
+    test()
+        .run(r#"["foo"] | each { |it| echo (echo $it) } | get 0"#)
+        .expect_value_eq("foo")
 }
 
 #[test]
-fn subexpression_properly_redirects() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo (nu --testbin cococo "hello") | str collect
-        "#
-    );
-
-    assert_eq!(actual.out, "hello");
+fn for_loop() -> Result {
+    test()
+        .run("mut out = ''; for i in 1..3 { $out = $out + ($i | into string) }; $out")
+        .expect_value_eq("123")
 }
 
 #[test]
-fn argument_subexpression() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo "foo" | each { echo (echo $it) }
-        "#
-    );
-
-    assert_eq!(actual.out, "foo");
-}
-
-#[test]
-fn subexpression_handles_dot() {
+#[deps(TESTBIN_CHOP)]
+fn subexpression_handles_dot() -> Result {
     Playground::setup("subexpression_handles_dot", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
+        sandbox.with_files(&[FileWithContentToBeTrimmed(
             "nu_times.csv",
-            r#"
+            "
                 name,rusty_luck,origin
                 Jason,1,Canada
-                Jonathan,1,New Zealand
-                Andrés,1,Ecuador
+                JT,1,New Zealand
+                Andres,1,Ecuador
                 AndKitKatz,1,Estados Unidos
-            "#,
+            ",
         )]);
 
-        let actual = nu!(
-        cwd: dirs.test(), pipeline(
-        r#"
+        let code = "
             echo (open nu_times.csv)
             | get name
-            | each { nu --testbin chop $it | lines }
-            | nth 3
-            "#
-        ));
+            | each { |it| chop $it }
+            | get 3
+        ";
 
-        assert_eq!(actual.out, "AndKitKat");
+        test()
+            .cwd(dirs.test())
+            .run(code)
+            .expect_value_eq("AndKitKat")
     })
 }
 
 #[test]
-fn string_interpolation_with_it() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-                    echo "foo" | each { echo $"($it)" }
-            "#
-    );
-
-    assert_eq!(actual.out, "foo");
+fn string_interpolation_with_it() -> Result {
+    test()
+        .run(r#"["foo"] | each { |it| echo $"($it)" } | get 0"#)
+        .expect_value_eq("foo")
 }
 
 #[test]
-fn string_interpolation_with_it_column_path() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-                    echo [[name]; [sammie]] | each { echo $"($it.name)" }
-        "#
-    );
-
-    assert_eq!(actual.out, "sammie");
+fn string_interpolation_with_it_column_path() -> Result {
+    test()
+        .run(r#"echo [[name]; [sammie]] | each { |it| echo $"($it.name)" } | get 0"#)
+        .expect_value_eq("sammie")
 }
 
 #[test]
-fn string_interpolation_shorthand_overlap() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-                    $"3 + 4 = (3 + 4)"
-        "#
-    );
-
-    assert_eq!(actual.out, "3 + 4 = 7");
+fn string_interpolation_shorthand_overlap() -> Result {
+    test()
+        .run(r#"$"3 + 4 = (3 + 4)""#)
+        .expect_value_eq("3 + 4 = 7")
 }
 
 #[test]
-fn string_interpolation_and_paren() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-                    $"a paren is ('(')"
-        "#
-    );
-
-    assert_eq!(actual.out, "a paren is (");
+fn string_interpolation_and_paren() -> Result {
+    test()
+        .run(r#"$"a paren is ('(')""#)
+        .expect_value_eq("a paren is (")
 }
 
 #[test]
-fn string_interpolation_with_unicode() {
-    //カ = U+30AB : KATAKANA LETTER KA
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            $"カ"
-        "#
-    );
-
-    assert_eq!(actual.out, "カ");
+fn string_interpolation_with_unicode() -> Result {
+    // カ = U+30AB : KATAKANA LETTER KA
+    test().run(r#"$"カ""#).expect_value_eq("カ")
 }
 
 #[test]
-fn bignum_large_integer() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo 91231720741731287123917
-        "#
-    );
-
-    assert_eq!(actual.out, "91231720741731287123917");
+fn run_custom_command() -> Result {
+    test()
+        .run("def add-me [x y] { $x + $y}; add-me 10 5")
+        .expect_value_eq(15)
 }
 
 #[test]
-fn bignum_large_decimal() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo 91231720741731287123917.1
-        "#
-    );
-
-    assert_eq!(actual.out, "91231720741731287123917.1");
+fn run_custom_command_with_flag() -> Result {
+    test()
+        .run(r#"def foo [--bar:number] { if ($bar | is-empty) { echo "empty" } else { echo $bar } }; foo --bar 10"#)
+        .expect_value_eq(10)
 }
 
 #[test]
-fn run_custom_command() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def add-me [x y] { $x + $y}; add-me 10 5
-        "#
-    );
-
-    assert_eq!(actual.out, "15");
+fn run_custom_command_with_flag_missing() -> Result {
+    test()
+        .run(r#"def foo [--bar:number] { if ($bar | is-empty) { echo "empty" } else { echo $bar } }; foo"#)
+        .expect_value_eq("empty")
 }
 
 #[test]
-fn run_custom_command_with_flag() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        def foo [--bar:number] { if ($bar | empty?) { echo "empty" } { echo $bar } }; foo --bar 10
-        "#
-    );
-
-    assert_eq!(actual.out, "10");
+fn run_custom_subcommand() -> Result {
+    test()
+        .run(r#"def "str double" [x] { echo $x $x | str join }; str double bob"#)
+        .expect_value_eq("bobbob")
 }
 
 #[test]
-fn run_custom_command_with_flag_missing() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        def foo [--bar:number] { if ($bar | empty?) { echo "empty" } { echo $bar } }; foo
-        "#
-    );
-
-    assert_eq!(actual.out, "empty");
+fn run_inner_custom_command() -> Result {
+    test()
+        .run("def outer [x] { def inner [y] { echo $y }; inner $x }; outer 10")
+        .expect_value_eq(10)
 }
 
 #[test]
-fn run_custom_subcommand() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        def "str double" [x] { echo $x $x | str collect }; str double bob
-        "#
-    );
-
-    assert_eq!(actual.out, "bobbob");
+fn run_broken_inner_custom_command() -> Result {
+    test()
+        .run("def outer [x] { def inner [y] { echo $y }; inner $x }; inner 10")
+        .expect_error()?;
+    Ok(())
 }
 
 #[test]
-fn run_inner_custom_command() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-          def outer [x] { def inner [y] { echo $y }; inner $x }; outer 10
-        "#
-    );
-
-    assert_eq!(actual.out, "10");
+fn run_custom_command_with_rest() -> Result {
+    test()
+        .run(r#"def rest-me [...rest: string] { echo $rest.1 $rest.0}; rest-me "hello" "world""#)
+        .expect_value_eq(["world", "hello"])
 }
 
 #[test]
-fn run_broken_inner_custom_command() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        def outer [x] { def inner [y] { echo $y }; inner $x }; inner 10
-        "#
-    );
-
-    assert!(actual.err.contains("not found"));
+fn run_custom_command_with_rest_and_arg() -> Result {
+    test()
+        .run(r#"def rest-me-with-arg [name: string, ...rest: string] { echo $rest.1 $rest.0 $name}; rest-me-with-arg "hello" "world" "yay""#)
+        .expect_value_eq(["yay", "world", "hello"])
 }
 
 #[test]
-fn run_custom_command_with_rest() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def rest-me [...rest: string] { echo $rest.1 $rest.0}; rest-me "hello" "world" | to json
-        "#
-    );
-
-    assert_eq!(actual.out, r#"["world","hello"]"#);
+fn run_custom_command_with_rest_and_flag() -> Result {
+    test()
+        .run(r#"def rest-me-with-flag [--name: string, ...rest: string] { echo $rest.1 $rest.0 $name}; rest-me-with-flag "hello" "world" --name "yay""#)
+        .expect_value_eq(["world", "hello", "yay"])
 }
 
 #[test]
-fn run_custom_command_with_rest_and_arg() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def rest-me-with-arg [name: string, ...rest: string] { echo $rest.1 $rest.0 $name}; rest-me-with-arg "hello" "world" "yay" | to json
-        "#
-    );
-
-    assert_eq!(actual.out, r#"["yay","world","hello"]"#);
+fn run_custom_command_with_empty_rest() -> Result {
+    test()
+        .run("def rest-me-with-empty-rest [...rest: string] { $rest }; rest-me-with-empty-rest | is-empty")
+        .expect_value_eq(true)
 }
 
 #[test]
-fn run_custom_command_with_rest_and_flag() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def rest-me-with-flag [--name: string, ...rest: string] { echo $rest.1 $rest.0 $name}; rest-me-with-flag "hello" "world" --name "yay" | to json
-        "#
-    );
-
-    assert_eq!(actual.out, r#"["world","hello","yay"]"#);
-}
-
-#[test]
-fn run_custom_command_with_empty_rest() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def rest-me-with-empty-rest [...rest: string] { echo $rest }; rest-me-with-empty-rest
-        "#
-    );
-
-    assert_eq!(actual.out, r#""#);
-    assert_eq!(actual.err, r#""#);
-}
-
-#[test]
-fn run_custom_command_with_rest_other_name() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def say-hello [
-                greeting:string,
-                ...names:string # All of the names
-                ] {
-                    echo $"($greeting), ($names | sort-by | str collect ' ')"
-                }
-            say-hello Salutations E D C A B
-        "#
-    );
-
-    assert_eq!(actual.out, r#"Salutations, A B C D E"#);
-    assert_eq!(actual.err, r#""#);
-}
-
-#[test]
-fn alias_a_load_env() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def activate-helper [] { [[name, value]; [BOB, SAM]] }; alias activate = load-env (activate-helper); activate; $nu.env.BOB
-        "#
-    );
-
-    assert_eq!(actual.out, r#"SAM"#);
-}
-
-#[test]
-fn let_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let x = 5
-            let y = 12
-            $x + $y
-        "#
-    );
-
-    assert_eq!(actual.out, "17");
-}
-
-#[test]
-fn let_doesnt_leak() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        do { let x = 5 }; echo $x
-        "#
-    );
-
-    assert!(actual.err.contains("unknown variable"));
-}
-
-#[test]
-fn let_env_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let-env TESTENVVAR = "hello world"
-            echo $nu.env.TESTENVVAR
-        "#
-    );
-
-    assert_eq!(actual.out, "hello world");
-}
-
-#[test]
-fn let_env_hides_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let-env TESTENVVAR = "hello world"
-            echo $nu.env.TESTENVVAR
-            let-env TESTENVVAR = $nothing
-            echo $nu.env.TESTENVVAR
-        "#
-    );
-
-    assert_eq!(actual.out, "hello world");
-    assert!(actual.err.contains("error"));
-    assert!(actual.err.contains("Unknown column"));
-}
-
-#[test]
-fn let_env_hides_variable_in_parent_scope() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let-env TESTENVVAR = "hello world"
-            echo $nu.env.TESTENVVAR
-            do {
-                let-env TESTENVVAR = $nothing
-                echo $nu.env.TESTENVVAR
-            }
-            echo $nu.env.TESTENVVAR
-        "#
-    );
-
-    assert_eq!(actual.out, "hello worldhello world");
-    assert!(actual.err.contains("error"));
-    assert!(actual.err.contains("Unknown column"));
-}
-
-#[test]
-fn unlet_env_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let-env TEST_VAR = "hello world"
-            unlet-env TEST_VAR
-            echo $nu.env.TEST_VAR
-        "#
-    );
-    assert!(actual.err.contains("did you mean"));
-}
-
-#[test]
-fn unlet_nonexistent_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            unlet-env NONEXISTENT_VARIABLE
-        "#
-    );
-
-    assert!(actual.err.contains("error"));
-    assert!(actual.err.contains("Not an environment variable"));
-}
-
-#[test]
-fn unlet_variable_in_parent_scope() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let-env DEBUG = "1"
-            echo $nu.env.DEBUG
-            do {
-                let-env DEBUG = "2"
-                echo $nu.env.DEBUG
-                unlet-env DEBUG
-                echo $nu.env.DEBUG
-            }
-            echo $nu.env.DEBUG
-        "#
-    );
-
-    assert_eq!(actual.out, "1211");
-}
-
-#[test]
-fn let_env_doesnt_leak() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        do { let-env xyz = "my message" }; echo $nu.env.xyz
-        "#
-    );
-
-    assert!(actual.err.contains("did you mean"));
-}
-
-#[test]
-fn proper_shadow_let_env_aliases() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let-env DEBUG = true; echo $nu.env.DEBUG | autoview; do { let-env DEBUG = false; echo $nu.env.DEBUG } | autoview; echo $nu.env.DEBUG
-        "#
-    );
-    assert_eq!(actual.out, "truefalsetrue");
-}
-
-#[test]
-fn load_env_variable() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo [[name, value]; [TESTENVVAR, "hello world"]] | load-env
-            echo $nu.env.TESTENVVAR
-        "#
-    );
-
-    assert_eq!(actual.out, "hello world");
-}
-
-#[test]
-fn load_env_variable_arg() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            load-env [[name, value]; [TESTENVVAR, "hello world"]]
-            echo $nu.env.TESTENVVAR
-        "#
-    );
-
-    assert_eq!(actual.out, "hello world");
-}
-
-#[test]
-fn load_env_variable_arg_and_stream() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo [[name, value]; [TESTVARSTREAM, "true"]] | load-env [[name, value]; [TESTVARARG, "false"]]
-            echo $nu.env | format "{TESTVARSTREAM} {TESTVARARG}"
-        "#
-    );
-
-    assert_eq!(actual.out, "true false");
-}
-
-#[test]
-fn load_env_doesnt_leak() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        do { echo [[name, value]; [xyz, "my message"]] | load-env }; echo $nu.env.xyz
-        "#
-    );
-
-    assert!(actual.err.contains("did you mean"));
-}
-
-#[test]
-fn proper_shadow_load_env_aliases() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let-env DEBUG = true; echo $nu.env.DEBUG | autoview; do { echo [[name, value]; [DEBUG, false]] | load-env; echo $nu.env.DEBUG } | autoview; echo $nu.env.DEBUG
-        "#
-    );
-    assert_eq!(actual.out, "truefalsetrue");
-}
-
-#[test]
-fn load_env_can_hide_var_envs() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let-env DEBUG = "1"
-        echo $nu.env.DEBUG
-        load-env [[name, value]; [DEBUG $nothing]]
-        echo $nu.env.DEBUG
-        "#
-    );
-    assert_eq!(actual.out, "1");
-    assert!(actual.err.contains("error"));
-    assert!(actual.err.contains("Unknown column"));
-}
-
-#[test]
-fn load_env_can_hide_var_envs_in_parent_scope() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let-env DEBUG = "1"
-        echo $nu.env.DEBUG
-        do {
-            load-env [[name, value]; [DEBUG $nothing]]
-            echo $nu.env.DEBUG
+fn run_custom_command_with_rest_other_name() -> Result {
+    let code = r#"
+        def say-hello [
+            greeting:string,
+            ...names:string # All of the names
+        ] {
+            echo $"($greeting), ($names | sort | str join)"
         }
-        echo $nu.env.DEBUG
-        "#
-    );
-    assert_eq!(actual.out, "11");
-    assert!(actual.err.contains("error"));
-    assert!(actual.err.contains("Unknown column"));
+        say-hello Salutations E D C A B
+    "#;
+
+    test().run(code).expect_value_eq("Salutations, ABCDE")
 }
 
 #[test]
-fn proper_shadow_let_aliases() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let DEBUG = false; echo $DEBUG | autoview; do { let DEBUG = true; echo $DEBUG } | autoview; echo $DEBUG
-        "#
-    );
-    assert_eq!(actual.out, "falsetruefalse");
+fn alias_a_load_env() -> Result {
+    let code = "
+        def activate-helper [] { {BOB: SAM} }
+        alias activate = load-env (activate-helper)
+        activate
+        $env.BOB
+    ";
+
+    test().run(code).expect_value_eq("SAM")
 }
 
 #[test]
-fn block_params_override() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        [1, 2, 3] | each { |a| echo $it }
-        "#
-    );
-    assert!(actual.err.contains("unknown variable"));
+fn let_variable() -> Result {
+    test()
+        .run("let x = 5; let y = 12; $x + $y")
+        .expect_value_eq(17)
 }
 
 #[test]
-fn block_params_override_correct() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        [1, 2, 3] | each { |a| echo $a } | to json
-        "#
-    );
-    assert_eq!(actual.out, "[1,2,3]");
+fn let_doesnt_leak() -> Result {
+    test()
+        .run("do { let x = 5 }; echo $x")
+        .expect_error_code_eq("nu::parser::variable_not_found")
 }
 
 #[test]
-fn hex_number() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        0x10
-        "#
-    );
-    assert_eq!(actual.out, "16");
+fn mutate_env_variable() -> Result {
+    test()
+        .run(r#"$env.TESTENVVAR = "hello world"; $env.TESTENVVAR"#)
+        .expect_value_eq("hello world")
 }
 
 #[test]
-fn binary_number() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        0b10
-        "#
+#[deps(NU)]
+fn mutate_env_hides_variable() -> Result {
+    let code = r#"
+        $env.TEST_ENV_VAR = "hello world"
+        print $env.TEST_ENV_VAR
+        hide-env TEST_ENV_VAR
+        print $env.TEST_ENV_VAR
+    "#;
+
+    let result: CompleteResult = test().run_with_data(NU_RUNNER, code)?;
+    assert_eq!(result.stdout, "hello world\n");
+    assert_contains(
+        "Environment variable 'TEST_ENV_VAR' not found",
+        result.stderr,
     );
-    assert_eq!(actual.out, "2");
+    Ok(())
 }
 
 #[test]
-fn octal_number() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        0o10
-        "#
+#[deps(NU)]
+fn mutate_env_hides_variable_in_parent_scope() -> Result {
+    let code = r#"
+        $env.TEST_ENV_VAR = "hello world"
+        print $env.TEST_ENV_VAR
+        do {
+            hide-env TEST_ENV_VAR
+            print $env.TEST_ENV_VAR
+        }
+        print $env.TEST_ENV_VAR
+    "#;
+
+    let result: CompleteResult = test().run_with_data(NU_RUNNER, code)?;
+    assert_eq!(result.stdout, "hello world\n");
+    assert_contains(
+        "Environment variable 'TEST_ENV_VAR' not found",
+        result.stderr,
     );
-    assert_eq!(actual.out, "8");
+    Ok(())
 }
 
 #[test]
-fn run_dynamic_blocks() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let block = { echo "holaaaa" }; do $block
-        "#
-    );
-    assert_eq!(actual.out, "holaaaa");
-}
-
-#[cfg(feature = "which")]
-#[test]
-fn argument_subexpression_reports_errors() {
-    let actual = nu!(
-        cwd: ".",
-        "echo (ferris_is_not_here.exe)"
-    );
-
-    assert!(actual.err.contains("Command not found"));
+fn unlet_env_variable() -> Result {
+    let err = test()
+        .run(r#"$env.TEST_VAR = "hello world"; hide-env TEST_VAR; $env.TEST_VAR"#)
+        .expect_error()?;
+    assert_matches!(err, ShellError::EnvVarNotFoundAtRuntime { envvar_name, .. } if envvar_name == "TEST_VAR");
+    Ok(())
 }
 
 #[test]
-fn can_process_one_row_from_internal_and_pipes_it_to_stdin_of_external() {
-    let actual = nu!(
-        cwd: ".",
-        r#"echo "nushelll" | nu --testbin chop"#
-    );
-
-    assert_eq!(actual.out, "nushell");
+fn unlet_nonexistent_variable() -> Result {
+    test()
+        .run("hide-env NONEXISTENT_VARIABLE")
+        .expect_error_code_eq("nu::shell::env_variable_not_found")
 }
 
 #[test]
-fn bad_operator() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            2 $ 2
-        "#
-    );
+fn unlet_variable_in_parent_scope() -> Result {
+    let code = r#"
+        $env.DEBUG = "1"
+        let inner = (do {
+            $env.DEBUG = "2"
+            hide-env DEBUG
+            $env.DEBUG
+        })
+        [$env.DEBUG, "2", $inner, $env.DEBUG] | str join
+    "#;
 
-    assert!(actual.err.contains("operator"));
+    test().run(code).expect_value_eq("1211")
 }
 
 #[test]
-fn index_out_of_bounds() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            let foo = [1, 2, 3]; echo $foo.5
-        "#
-    );
-
-    assert!(actual.err.contains("unknown row"));
+fn mutate_env_doesnt_leak() -> Result {
+    let err = test()
+        .run(r#"do { $env.xyz = "my message" }; $env.xyz"#)
+        .expect_error()?;
+    assert_matches!(err, ShellError::EnvVarNotFoundAtRuntime { envvar_name, .. } if envvar_name == "xyz");
+    Ok(())
 }
 
 #[test]
-fn dash_def() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            def - [x, y] { $x - $y }; - 4 1
-        "#
-    );
+fn proper_shadow_mutate_env_aliases() -> Result {
+    let code = r#"
+        $env.DEBUG = "true"
+        let inner = (do { $env.DEBUG = "false"; $env.DEBUG })
+        [$env.DEBUG, $inner, $env.DEBUG] | str join
+    "#;
 
-    assert_eq!(actual.out, "3");
+    test().run(code).expect_value_eq("truefalsetrue")
 }
 
 #[test]
-fn negative_decimal_start() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            -1.3 + 4
-        "#
-    );
-
-    assert_eq!(actual.out, "2.7");
+fn load_env_variable() -> Result {
+    test()
+        .run(r#"echo {TESTENVVAR: "hello world"} | load-env; $env.TESTENVVAR"#)
+        .expect_value_eq("hello world")
 }
 
 #[test]
-fn string_inside_of() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            "bob" in "bobby"
-        "#
-    );
-
-    assert_eq!(actual.out, "true");
+fn load_env_variable_arg() -> Result {
+    test()
+        .run(r#"load-env {TESTENVVAR: "hello world"}; $env.TESTENVVAR"#)
+        .expect_value_eq("hello world")
 }
 
 #[test]
-fn string_not_inside_of() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            "bob" not-in "bobby"
-        "#
-    );
+fn load_env_converts_loaded_variables() -> Result {
+    let code = r#"
+        $env.ENV_CONVERSIONS = { TESTENVVAR: { from_string: { split row ":" } } }
+        load-env { TESTENVVAR: "hello:world" }
+        $env.TESTENVVAR
+    "#;
 
-    assert_eq!(actual.out, "false");
+    test().run(code).expect_value_eq(["hello", "world"])
 }
 
 #[test]
-fn index_row() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let foo = [[name]; [joe] [bob]]; echo $foo.1 | to json
-        "#
-    );
+fn load_env_makes_path_a_list() -> Result {
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let code = format!("load-env {{ pAtH: 'first{separator}second' }}; $env.PATH");
 
-    assert_eq!(actual.out, r#"{"name":"bob"}"#);
+    test().run(code).expect_value_eq(["first", "second"])
 }
 
 #[test]
-fn index_cell() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let foo = [[name]; [joe] [bob]]; echo $foo.name.1
-        "#
-    );
+fn load_env_converts_only_what_it_loads() -> Result {
+    let code = r#"
+        $env.ENV_CONVERSIONS = { OTHER: { from_string: { split row "," } } }
+        $env.OTHER = "a,b"
+        load-env { TESTENVVAR: "x,y" }
+        $env.OTHER
+    "#;
 
-    assert_eq!(actual.out, "bob");
+    test().run(code).expect_value_eq("a,b")
 }
 
 #[test]
-fn index_cell_alt() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        let foo = [[name]; [joe] [bob]]; echo $foo.1.name
-        "#
-    );
-
-    assert_eq!(actual.out, "bob");
+fn load_env_leaves_path_alone_when_it_isnt_loaded() -> Result {
+    test()
+        .run("$env.PATH = 5; load-env { TESTENVVAR: 1 }; $env.TESTENVVAR")
+        .expect_value_eq(1)
 }
 
 #[test]
-fn not_echoing_ranges_without_numbers() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo ..
-        "#
-    );
+fn load_env_leaves_path_alone_when_a_converted_variable_is_loaded() -> Result {
+    let code = r#"
+        $env.ENV_CONVERSIONS = { TESTENVVAR: { from_string: { split row "," } } }
+        $env.PATH = 5
+        load-env { TESTENVVAR: "x,y" }
+        [$env.PATH $env.TESTENVVAR]
+    "#;
 
-    assert_eq!(actual.out, "..");
+    test()
+        .run(code)
+        .expect_value_eq(test_value!([5, ["x", "y"]]))
 }
 
 #[test]
-fn not_echoing_exclusive_ranges_without_numbers() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo ..<
-        "#
-    );
+fn load_env_skips_a_conversion_without_from_string() -> Result {
+    let code = r#"
+        $env.ENV_CONVERSIONS = { TESTENVVAR: { to_string: { $in } } }
+        load-env { TESTENVVAR: "x" }
+        $env.TESTENVVAR
+    "#;
 
-    assert_eq!(actual.out, "..<");
+    test().run(code).expect_value_eq("x")
 }
 
 #[test]
-fn echoing_ranges() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo 1..3 | math sum
-        "#
-    );
+fn load_env_loads_nothing_when_a_conversion_fails() -> Result {
+    let code = r#"
+        $env.ENV_CONVERSIONS = { TESTENVVAR: { from_string: { error make { msg: boom } } } }
+        try { load-env { OTHER: "a", TESTENVVAR: "x" } }
+        [($env.OTHER? == null) ($env.TESTENVVAR? == null)]
+    "#;
 
-    assert_eq!(actual.out, "6");
+    test().run(code).expect_value_eq([true, true])
 }
 
 #[test]
-fn echoing_exclusive_ranges() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo 1..<4 | math sum
-        "#
-    );
+fn load_env_of_env_conversions_converts_every_variable() -> Result {
+    let code = r#"
+        $env.OTHER = "a,b"
+        load-env { ENV_CONVERSIONS: { OTHER: { from_string: { split row "," } } } }
+        $env.OTHER
+    "#;
 
-    assert_eq!(actual.out, "6");
+    test().run(code).expect_value_eq(["a", "b"])
 }
 
 #[test]
-fn table_literals1() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-            echo [[name age]; [foo 13]] | get age
-        "#
-    );
+fn refreshing_env_conversions_normalizes_path() -> Result {
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let code =
+        format!("$env.PATH = 'first{separator}second'; $env.ENV_CONVERSIONS = {{}}; $env.PATH");
 
-    assert_eq!(actual.out, "13");
+    test().run(code).expect_value_eq(["first", "second"])
 }
 
 #[test]
-fn table_literals2() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo [[name age] ; [bob 13] [sally 20]] | get age | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "33");
+fn load_env_doesnt_leak() -> Result {
+    let err = test()
+        .run(r#"do { echo { name: xyz, value: "my message" } | load-env }; $env.xyz"#)
+        .expect_error()?;
+    assert_matches!(err, ShellError::EnvVarNotFoundAtRuntime { envvar_name, .. } if envvar_name == "xyz");
+    Ok(())
 }
 
 #[test]
-fn list_with_commas() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo [1, 2, 3] | math sum
-        "#
-    );
+fn proper_shadow_load_env_aliases() -> Result {
+    let code = r#"
+        $env.DEBUG = "true"
+        let inner = (do { echo {DEBUG: "false"} | load-env; $env.DEBUG })
+        [$env.DEBUG, $inner, $env.DEBUG] | str join
+    "#;
 
-    assert_eq!(actual.out, "6");
+    test().run(code).expect_value_eq("truefalsetrue")
+}
+
+//FIXME: jt: load-env can not currently hide variables because null no longer hides
+#[ignore]
+#[test]
+#[deps(NU)]
+fn load_env_can_hide_var_envs() -> Result {
+    let runner = "let commands = $in; nu -n -c $commands | complete";
+    let code = r#"
+        $env.DEBUG = "1"
+        echo $env.DEBUG
+        load-env [[name, value]; [DEBUG null]]
+        echo $env.DEBUG
+    "#;
+
+    let result: CompleteResult = test().run_with_data(runner, code)?;
+    assert_eq!(result.stdout, "1");
+    assert_contains("error", &result.stderr);
+    assert_contains("Unknown column", result.stderr);
+    Ok(())
+}
+
+//FIXME: jt: load-env can not currently hide variables because null no longer hides
+#[ignore]
+#[test]
+#[deps(NU)]
+fn load_env_can_hide_var_envs_in_parent_scope() -> Result {
+    let code = r#"
+        $env.DEBUG = "1"
+        echo $env.DEBUG
+        do {
+            load-env [[name, value]; [DEBUG null]]
+            echo $env.DEBUG
+        }
+        echo $env.DEBUG
+    "#;
+
+    let result: CompleteResult = test().run_with_data(NU_RUNNER, code)?;
+    assert_eq!(result.stdout, "11");
+    assert_contains("error", &result.stderr);
+    assert_contains("Unknown column", result.stderr);
+    Ok(())
 }
 
 #[test]
-fn range_with_left_var() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo [[size]; [3]] | each { echo $it.size..10 } | math sum
-        "#
-    );
+fn proper_shadow_let_aliases() -> Result {
+    let code = "
+        let DEBUG = false
+        let inner = (do { let DEBUG = true; $DEBUG })
+        [$DEBUG, $inner, $DEBUG] | str join
+    ";
 
-    assert_eq!(actual.out, "52");
+    test().run(code).expect_value_eq("falsetruefalse")
 }
 
 #[test]
-fn range_with_right_var() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo [[size]; [30]] | each { echo 4..$it.size } | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "459");
+fn block_params_override() -> Result {
+    test()
+        .run("[1, 2, 3] | each { |a| echo $it }")
+        .expect_error_code_eq("nu::parser::variable_not_found")
 }
 
 #[test]
-fn range_with_open_left() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo ..30 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "465");
+fn alias_reuse() -> Result {
+    test()
+        .run("alias foo = echo bob; foo; foo")
+        .expect_value_eq("bob")
 }
 
 #[test]
-fn exclusive_range_with_open_left() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo ..<31 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "465");
+fn block_params_override_correct() -> Result {
+    test()
+        .run("[1, 2, 3] | each { |a| echo $a }")
+        .expect_value_eq([1, 2, 3])
 }
 
 #[test]
-fn range_with_open_right() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo 5.. | first 10 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "95");
+fn hex_number() -> Result {
+    test().run("0x10").expect_value_eq(16)
 }
 
 #[test]
-fn exclusive_range_with_open_right() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo 5..< | first 10 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "95");
+fn binary_number() -> Result {
+    test().run("0b10").expect_value_eq(2)
 }
 
 #[test]
-fn range_with_mixed_types() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo 1..10.5 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "55");
+fn octal_number() -> Result {
+    test().run("0o10").expect_value_eq(8)
 }
 
 #[test]
-fn filesize_math() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        100 * 10kb
-        "#
-    );
-
-    assert_eq!(actual.out, "1000.0 KB");
-    // why 1000.0 KB instead of 1.0 MB?
-    // looks like `byte.get_appropriate_unit(false)` behaves this way
+fn run_dynamic_closures() -> Result {
+    test()
+        .run(r#"let closure = {|| echo "holaaaa" }; do $closure"#)
+        .expect_value_eq("holaaaa")
 }
 
 #[test]
-fn filesize_math2() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        100 / 10kb
-        "#
+fn dynamic_closure_type_check() -> Result {
+    let err = test()
+        .run(r#"let closure = {|x: int| echo $x}; do $closure "aa""#)
+        .expect_shell_error()?;
+    assert_matches!(
+        err,
+        ShellError::CantConvert { to_type, from_type, .. }
+            if to_type == "int" && from_type == "string"
     );
-
-    assert!(actual.err.contains("Coercion"));
+    Ok(())
 }
 
 #[test]
-fn filesize_math3() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        100kb / 10
-        "#
-    );
-
-    assert_eq!(actual.out, "10.0 KB");
-}
-#[test]
-fn filesize_math4() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        100kb * 5
-        "#
-    );
-
-    assert_eq!(actual.out, "500.0 KB");
+fn dynamic_closure_optional_arg() -> Result {
+    test()
+        .run("let closure = {|x: int = 3| echo $x}; do $closure")
+        .expect_value_eq(3)?;
+    test()
+        .run("let closure = {|x: int = 3| echo $x}; do $closure 10")
+        .expect_value_eq(10)
 }
 
 #[test]
-fn filesize_math5() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        1001 * 1kb
-        "#
-    );
-
-    assert_eq!(actual.out, "1.0 MB");
+fn dynamic_closure_rest_args() -> Result {
+    test()
+        .run(r#"let closure = {|...args| $args | str join ""}; do $closure 1 2 3"#)
+        .expect_value_eq("123")?;
+    test()
+        .run(r#"let closure = {|required, ...args| $"($required), ($args | str join "")"}; do $closure 1 2 3"#)
+        .expect_value_eq("1, 23")?;
+    test()
+        .run(r#"let closure = {|required, optional?, ...args| $"($required), ($optional), ($args | str join "")"}; do $closure 1 2 3"#)
+        .expect_value_eq("1, 2, 3")
 }
 
 #[test]
-fn filesize_math6() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        1001 * 1mb
-        "#
-    );
-
-    assert_eq!(actual.out, "1.0 GB");
+fn argument_subexpression_reports_errors() -> Result {
+    test().run("echo (ferris_is_not_here.exe)").expect_error()?;
+    Ok(())
 }
 
 #[test]
-fn filesize_math7() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        1001 * 1gb
-        "#
-    );
-
-    assert_eq!(actual.out, "1.0 TB");
+#[deps(TESTBIN_CHOP)]
+fn can_process_one_row_from_internal_and_pipes_it_to_stdin_of_external() -> Result {
+    test()
+        .run(r#""nushelll" | chop"#)
+        .expect_value_eq("nushell")
 }
 
 #[test]
-fn exclusive_range_with_mixed_types() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo 1..<10.5 | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "55");
+fn bad_operator() -> Result {
+    let err = test().run("2 $ 2").expect_parse_error()?;
+    assert_matches!(err, ParseError::Expected("operator", ..));
+    Ok(())
 }
 
 #[test]
-fn table_with_commas() {
-    let actual = nu!(
-        cwd: ".",
-        r#"
-        echo [[name, age, height]; [JT, 42, 185] [Unknown, 99, 99]] | get age | math sum
-        "#
-    );
-
-    assert_eq!(actual.out, "141");
+fn index_out_of_bounds() -> Result {
+    test()
+        .run("let foo = [1, 2, 3]; echo $foo.5")
+        .expect_error_code_eq("nu::shell::access_beyond_end")
 }
 
 #[test]
-fn duration_overflow() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        ls | get modified | each { $it + 10000000000000000day }
-        "#)
-    );
-
-    assert!(actual.err.contains("Duration overflow"));
+fn negative_float_start() -> Result {
+    test().run("-1.3 + 4").expect_value_eq(2.7)
 }
 
 #[test]
-fn date_and_duration_overflow() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        ls | get modified | each { $it + 1000000000day }
-        "#)
-    );
-
-    // assert_eq!(actual.err, "overflow");
-    assert!(actual.err.contains("Duration and date addition overflow"));
+fn string_inside_of() -> Result {
+    test().run(r#""bob" in "bobby""#).expect_value_eq(true)
 }
 
 #[test]
-fn pipeline_params_simple() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        echo 1 2 3 | $in.1 * $in.2
-        "#)
-    );
-
-    assert_eq!(actual.out, "6");
+fn string_not_inside_of() -> Result {
+    test().run(r#""bob" not-in "bobby""#).expect_value_eq(false)
 }
 
 #[test]
-fn pipeline_params_inner() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        echo 1 2 3 | (echo $in.2 6 7 | $in.0 * $in.1 * $in.2)
-        "#)
-    );
-
-    assert_eq!(actual.out, "126");
+fn index_row() -> Result {
+    test()
+        .run("let foo = [[name]; [joe] [bob]]; echo $foo.1")
+        .expect_value_eq(test_record! { "name" => "bob" })
 }
 
 #[test]
-fn better_table_lex() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
+fn index_cell() -> Result {
+    test()
+        .run("let foo = [[name]; [joe] [bob]]; echo $foo.name.1")
+        .expect_value_eq("bob")
+}
+
+#[test]
+fn index_cell_alt() -> Result {
+    test()
+        .run("let foo = [[name]; [joe] [bob]]; echo $foo.1.name")
+        .expect_value_eq("bob")
+}
+
+#[test]
+fn not_echoing_ranges_without_numbers() -> Result {
+    test().run("echo ..").expect_value_eq("..")
+}
+
+#[test]
+fn not_echoing_exclusive_ranges_without_numbers() -> Result {
+    test().run("echo ..<").expect_value_eq("..<")
+}
+
+#[test]
+fn echoing_ranges() -> Result {
+    test().run("echo 1..3 | math sum").expect_value_eq(6)
+}
+
+#[test]
+fn echoing_exclusive_ranges() -> Result {
+    test().run("echo 1..<4 | math sum").expect_value_eq(6)
+}
+
+#[test]
+fn table_literals1() -> Result {
+    test()
+        .run("echo [[name age]; [foo 13]] | get age.0")
+        .expect_value_eq(13)
+}
+
+#[test]
+fn table_literals2() -> Result {
+    test()
+        .run("echo [[name age] ; [bob 13] [sally 20]] | get age | math sum")
+        .expect_value_eq(33)
+}
+
+#[test]
+fn list_with_commas() -> Result {
+    test().run("echo [1, 2, 3] | math sum").expect_value_eq(6)
+}
+
+#[test]
+fn range_with_left_var() -> Result {
+    test()
+        .run("({ size: 3}.size)..10 | math sum")
+        .expect_value_eq(52)
+}
+
+#[test]
+fn range_with_right_var() -> Result {
+    test()
+        .run("4..({ size: 30}.size) | math sum")
+        .expect_value_eq(459)
+}
+
+#[test]
+fn range_with_open_left() -> Result {
+    test().run("echo ..30 | math sum").expect_value_eq(465)
+}
+
+#[test]
+fn exclusive_range_with_open_left() -> Result {
+    test().run("echo ..<31 | math sum").expect_value_eq(465)
+}
+
+#[test]
+fn range_with_open_right() -> Result {
+    test()
+        .run("echo 5.. | first 10 | math sum")
+        .expect_value_eq(95)
+}
+
+#[test]
+fn exclusive_range_with_open_right() -> Result {
+    test()
+        .run("echo 5..< | first 10 | math sum")
+        .expect_value_eq(95)
+}
+
+#[test]
+fn range_with_mixed_types() -> Result {
+    test().run("echo 1..10.5 | math sum").expect_value_eq(55.0)
+}
+
+#[rstest]
+#[case::int_mul_filesize("100 * 10kb", 1_000_000)]
+#[case::filesize_div_int("100kB / 10", 10_000)]
+#[case::filesize_mul_int("100kB * 5", 500_000)]
+fn filesize_math(#[case] code: &str, #[case] filesize: u32) -> Result {
+    test()
+        .run(code)
+        .expect_value_eq(Value::test_filesize(filesize))
+}
+
+#[test]
+fn cannot_divide_by_filesize() -> Result {
+    test()
+        .run("100 / 10kB")
+        .expect_error_code_eq("nu::parser::operator_incompatible_types")
+}
+
+#[test]
+fn exclusive_range_with_mixed_types() -> Result {
+    test().run("echo 1..<10.5 | math sum").expect_value_eq(55.0)
+}
+
+#[test]
+fn table_with_commas() -> Result {
+    test()
+        .run("echo [[name, age, height]; [JT, 42, 185] [Unknown, 99, 99]] | get age | math sum")
+        .expect_value_eq(141)
+}
+
+#[test]
+fn duration_overflow() -> Result {
+    let err = test()
+        .run("ls | get modified | each { |it| $it + 10000000000000000day }")
+        .expect_parse_error()?;
+    assert_matches!(err, ParseError::LiteralTooLarge(..));
+    Ok(())
+}
+
+#[test]
+fn date_and_duration_overflow() -> Result {
+    let err = test()
+        .run("ls | get modified | each { |it| $it + 1000000000day }")
+        .expect_parse_error()?;
+    assert_matches!(err, ParseError::LiteralTooLarge(..));
+    Ok(())
+}
+
+#[test]
+fn pipeline_params_simple() -> Result {
+    test().run("echo 1 2 3 | $in.1 * $in.2").expect_value_eq(6)
+}
+
+#[test]
+fn pipeline_params_inner() -> Result {
+    test()
+        .run("echo 1 2 3 | (echo $in.2 6 7 | $in.0 * $in.1 * $in.2)")
+        .expect_value_eq(126)
+}
+
+#[test]
+fn better_table_lex() -> Result {
+    let code = "
         let table = [
             [name, size];
             [small, 7]
             [medium, 10]
             [large, 12]
-        ];
+        ]
         $table.1.size
-        "#)
-    );
+    ";
 
-    assert_eq!(actual.out, "10");
+    test().run(code).expect_value_eq(10)
 }
 
 #[test]
-fn better_subexpr_lex() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        (echo boo
-        sam | str length | math sum)
-        "#)
-    );
-
-    assert_eq!(actual.out, "6");
+fn better_subexpr_lex() -> Result {
+    test()
+        .run("(echo boo sam | str length | math sum)")
+        .expect_value_eq(6)
 }
 
 #[test]
-fn subsubcommand() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        def "aws s3 rb" [url] { $url + " loaded" }; aws s3 rb localhost
-        "#)
-    );
-
-    assert_eq!(actual.out, "localhost loaded");
+fn subsubcommand() -> Result {
+    test()
+        .run(r#"def "aws s3 rb" [url] { $url + " loaded" }; aws s3 rb localhost"#)
+        .expect_value_eq("localhost loaded")
 }
 
 #[test]
-fn manysubcommand() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        def "aws s3 rb ax vf qqqq rrrr" [url] { $url + " loaded" }; aws s3 rb ax vf qqqq rrrr localhost
-        "#)
-    );
-
-    assert_eq!(actual.out, "localhost loaded");
+fn manysubcommand() -> Result {
+    test()
+        .run(r#"def "aws s3 rb ax vf qqqq rrrr" [url] { $url + " loaded" }; aws s3 rb ax vf qqqq rrrr localhost"#)
+        .expect_value_eq("localhost loaded")
 }
 
 #[test]
-fn nothing_string_1() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        $nothing == "foo"
-        "#)
-    );
-
-    assert_eq!(actual.out, "false");
+fn nothing_string_1() -> Result {
+    test().run(r#"null == "foo""#).expect_value_eq(false)
 }
 
 #[test]
-fn nothing_string_2() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
-        "" == $nothing
-        "#)
-    );
-
-    assert_eq!(actual.out, "true");
-}
-
-#[test]
-fn unalias_shadowing() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
+fn hide_alias_shadowing() -> Result {
+    let code = "
         def test-shadowing [] {
-            alias greet = echo hello;
-            let xyz = { greet };
-            unalias greet;
+            alias greet = echo hello
+            let xyz = {|| greet }
+            hide greet
             do $xyz
-        };
+        }
         test-shadowing
-        "#)
-    );
-    assert_eq!(actual.out, "hello");
+    ";
+
+    test().run(code).expect_value_eq("hello")
 }
 
+// FIXME: Seems like subexpression are no longer scoped. Should we remove this test?
+#[ignore]
 #[test]
-fn unalias_does_not_escape_scope() {
-    let actual = nu!(
-        cwd: ".", pipeline(
-        r#"
+fn hide_alias_does_not_escape_scope() -> Result {
+    let code = "
         def test-alias [] {
-            alias greet = echo hello;
-            (unalias greet);
+            alias greet = echo hello
+            (hide greet)
             greet
-        };
+        }
         test-alias
-        "#)
-    );
-    assert_eq!(actual.out, "hello");
+    ";
+
+    test().run(code).expect_value_eq("hello")
 }
 
 #[test]
-fn unalias_hides_alias() {
-    let actual = nu!(cwd: ".", pipeline(
-        r#"
+fn hide_alias_hides_alias() -> Result {
+    let code = "
         def test-alias [] {
-            alias ll = ls -l;
-            unalias ll;
+            alias ll = ls -l
+            hide ll
             ll
-        };
+        }
         test-alias
-        "#)
-    );
+    ";
 
-    assert!(actual.err.contains("not found"));
+    let err = test().run(code).expect_shell_error()?;
+    assert_matches!(err, ShellError::ExternalCommand { label, .. } if label == "Command `ll` not found");
+    Ok(())
 }
 
 mod parse {
-    use nu_test_support::nu;
+    use nu_test_support::prelude::*;
+    use pretty_assertions::assert_matches;
 
     /*
         The debug command's signature is:
@@ -1318,131 +911,244 @@ mod parse {
         > debug {flags}
 
         flags:
-        -h, --help: Display this help message
+        -h, --help: Display the help message for this command
         -r, --raw: Prints the raw value representation.
     */
 
     #[test]
-    fn errors_if_flag_passed_is_not_exact() {
-        let actual = nu!(cwd: ".", "debug -ra");
+    fn errors_if_flag_passed_is_not_exact() -> Result {
+        let err = test().run("debug -ra").expect_parse_error()?;
+        assert_matches!(err, ParseError::UnknownFlag(name, flag, ..) if name == "debug" && flag == "-a");
 
-        assert!(actual.err.contains("unexpected flag"),);
+        let err = test().run("debug --rawx").expect_parse_error()?;
+        assert_matches!(err, ParseError::UnknownFlag(name, flag, ..) if name == "debug" && flag == "rawx");
 
-        let actual = nu!(cwd: ".", "debug --rawx");
-
-        assert!(actual.err.contains("unexpected flag"),);
+        Ok(())
     }
 
     #[test]
-    fn errors_if_flag_is_not_supported() {
-        let actual = nu!(cwd: ".", "debug --ferris");
-
-        assert!(actual.err.contains("unexpected flag"),);
+    fn errors_if_flag_is_not_supported() -> Result {
+        let err = test().run("debug --ferris").expect_parse_error()?;
+        assert_matches!(err, ParseError::UnknownFlag(name, flag, ..) if name == "debug" && flag == "ferris");
+        Ok(())
     }
 
     #[test]
-    fn errors_if_passed_an_unexpected_argument() {
-        let actual = nu!(cwd: ".", "debug ferris");
+    fn errors_if_passed_an_unexpected_argument() -> Result {
+        let err = test().run("debug ferris").expect_parse_error()?;
+        assert_matches!(err, ParseError::ExtraPositional(..));
+        Ok(())
+    }
 
-        assert!(actual.err.contains("unexpected argument"),);
+    #[test]
+    fn ensure_backticks_are_bareword_command() -> Result {
+        test()
+            .run("`8abc123`")
+            .expect_error_code_eq("nu::shell::external_command")
     }
 }
 
 mod tilde_expansion {
-    use nu_test_support::nu;
+    use nu_test_support::prelude::*;
 
     #[test]
     #[should_panic]
-    fn as_home_directory_when_passed_as_argument_and_begins_with_tilde() {
-        let actual = nu!(
-            cwd: ".",
-            r#"
-            echo ~
-        "#
-        );
-
-        assert!(!actual.out.contains('~'),);
+    fn as_home_directory_when_passed_as_argument_and_begins_with_tilde() -> Result {
+        let actual: String = test().run("echo ~")?;
+        assert_contains_not("~", actual);
+        Ok(())
     }
 
     #[test]
-    fn does_not_expand_when_passed_as_argument_and_does_not_start_with_tilde() {
-        let actual = nu!(
-            cwd: ".",
-            r#"
-                    echo "1~1"
-                "#
-        );
-
-        assert_eq!(actual.out, "1~1");
+    fn does_not_expand_when_passed_as_argument_and_does_not_start_with_tilde() -> Result {
+        test().run(r#"echo "1~1""#).expect_value_eq("1~1")
     }
 }
 
 mod variable_scoping {
-    use nu_test_support::nu;
+    use nu_test_support::prelude::*;
+    use rstest::rstest;
 
-    macro_rules! test_variable_scope {
-        ($func:literal == $res:literal $(,)*) => {
-            let actual = nu!(
-                cwd: ".",
-                $func
-            );
-
-            assert_eq!(actual.out, $res);
-        };
+    #[rustfmt::skip]
+    #[rstest]
+    #[case("[0 1 2] | do { do { $input } }", "ZZZ")]
+    #[case(r#"[0 1 2] | do { do { if $input == "ZZZ" { $input } else { $input } } }"#, "ZZZ")]
+    #[case(r#"[0 1 2] | do { do { if $input == "ZZZ" { $input } else { $input } } }"#, "ZZZ")]
+    #[case("[0 1 2] | do { $input }", "ZZZ")]
+    #[case("[0 1 2] | do { if $input == $input { $input } else { $input } }", "ZZZ")]
+    #[case("[0 1 2] | each { |_| $input }", ["ZZZ", "ZZZ", "ZZZ"])]
+    #[case("[0 1 2] | each { |it| if $it > 0 { $input } else { $input } }", ["ZZZ", "ZZZ", "ZZZ"])]
+    #[case("[0 1 2] | each { |_| if $input == $input { $input } else { $input } }", ["ZZZ", "ZZZ", "ZZZ"])]
+    fn test_variable_scope(#[case] body: &str, #[case] expected: impl IntoValue) -> Result {
+        let code = format!("def test [input] {{ {body} }}; test ZZZ");
+        test().run(code).expect_value_eq(expected)
     }
-    macro_rules! test_variable_scope_list {
-        ($func:literal == $res:expr $(,)*) => {
-            let actual = nu!(
-                cwd: ".",
-                $func
-            );
+}
 
-            let result: Vec<&str> = actual.out.matches("ZZZ").collect();
-            assert_eq!(result, $res);
-        };
-    }
+#[test]
+#[deps(NU)]
+fn pipe_input_to_print() -> Result {
+    let result: CompleteResult = test().run_with_data(NU_RUNNER, r#""foo" | print | describe"#)?;
+    // "foo" got printed, but the output type is "nothing"
+    assert_eq!(result.stdout, "foo\nnothing\n");
+    Ok(())
+}
 
-    #[test]
-    fn access_variables_in_scopes() {
-        test_variable_scope!(
-            r#" def test [input] { echo [0 1 2] | do { do { echo $input } } }
-                test ZZZ "#
-                == "ZZZ"
-        );
-        test_variable_scope!(
-            r#" def test [input] { echo [0 1 2] | do { do { if $input == "ZZZ" { echo $input } { echo $input } } } }
-                test ZZZ "#
-                == "ZZZ"
-        );
-        test_variable_scope!(
-            r#" def test [input] { echo [0 1 2] | do { do { if $input == "ZZZ" { echo $input } { echo $input } } } }
-                test ZZZ "#
-                == "ZZZ"
-        );
-        test_variable_scope!(
-            r#" def test [input] { echo [0 1 2] | do { echo $input } }
-                test ZZZ "#
-                == "ZZZ"
-        );
-        test_variable_scope!(
-            r#" def test [input] { echo [0 1 2] | do { if $input == $input { echo $input } { echo $input } } }
-                test ZZZ "#
-                == "ZZZ"
-        );
-        test_variable_scope_list!(
-            r#" def test [input] { echo [0 1 2] | each { echo $input } }
-                test ZZZ "#
-                == ["ZZZ", "ZZZ", "ZZZ"]
-        );
-        test_variable_scope_list!(
-            r#" def test [input] { echo [0 1 2] | each { if $it > 0 {echo $input} {echo $input}} }
-                test ZZZ "#
-                == ["ZZZ", "ZZZ", "ZZZ"]
-        );
-        test_variable_scope_list!(
-            r#" def test [input] { echo [0 1 2] | each { if $input == $input {echo $input} {echo $input}} }
-                test ZZZ "#
-                == ["ZZZ", "ZZZ", "ZZZ"]
-        );
-    }
+#[rstest]
+#[case::err("e>")]
+#[case::out_err("o+e>")]
+fn err_pipe_input_to_print(#[case] redirect: &str) -> Result {
+    let err = test()
+        .run(format!(r#""foo" {redirect}| print"#))
+        .expect_shell_error()?;
+    assert_eq!(
+        "piping stderr only works on external commands",
+        err.generic_msg()?
+    );
+    Ok(())
+}
+
+#[test]
+fn command_not_found_error_shows_not_found_2() -> Result {
+    let err = test()
+        .run("export def --wrapped my-foo [...rest] { foo }; my-foo")
+        .expect_shell_error()?;
+    assert_matches!(
+        err,
+        ShellError::ExternalCommand {label, help, ..}
+            if label == "Command `foo` not found" && help == "Did you mean `for`?"
+    );
+    Ok(())
+}
+
+#[test]
+fn error_on_out_greater_pipe() -> Result {
+    let err = test().run(r#""foo" o>| print"#).expect_parse_error()?;
+    assert_matches!(
+        err,
+        ParseError::Expected(msg, ..)
+            if msg == "`|`.  Redirecting stdout to a pipe is the same as normal piping."
+    );
+    Ok(())
+}
+
+#[test]
+#[deps(TESTBIN_FAIL)]
+fn error_with_backtrace() -> Result {
+    let code = "
+        def a [x] {
+            if $x == 3 {
+                error make {
+                    msg: 'a custom error'
+                }
+            }
+        }
+
+        a 3
+    ";
+
+    let err = test()
+        .env("NU_BACKTRACE", 1)
+        .run(code)
+        .expect_shell_error()?
+        .into_inner()? // we go 2 layers deep
+        .into_inner()?
+        .into_labeled()?;
+    assert_eq!(err.msg, "a custom error");
+
+    // without NU_BACKTRACE, the labeled error is there immediately
+    let err = test().run(code).expect_shell_error()?.into_labeled()?;
+    assert_eq!(err.msg, "a custom error");
+
+    let err = test()
+        .env("NU_BACKTRACE", 1)
+        .run("fail")
+        .expect_shell_error()?;
+    // calling externals does not chain errors
+    assert_matches!(err, ShellError::NonZeroExitCode { .. });
+
+    Ok(())
+}
+
+#[test]
+fn liststream_error_with_backtrace_custom() -> Result {
+    let code = "
+        def a [x] {
+            if $x == 3 {
+                [1] | each {
+                    error make {
+                        'msg': 'a custom error'
+                    }
+                }
+            }
+        }
+        
+        a 3
+    ";
+
+    let err = test()
+        .env("NU_BACKTRACE", 1)
+        .run(code)
+        .expect_shell_error()?;
+    assert_matches!(err, ShellError::EvalBlockWithInput(..));
+    let err = err.into_inner()?;
+
+    // is this enough to test that backtracing is on?
+    assert_eq!(err.into_inner()?.into_labeled()?.msg, "a custom error");
+    Ok(())
+}
+
+#[test]
+fn liststream_error_with_backtrace_function() -> Result {
+    let code = "
+        def a [x] {
+            if $x == 3 {
+                [1] | each {
+                    error make {
+                        msg: 'a custom error'
+                    }
+                }
+            }
+        }
+        
+        def b [] {
+            a 1
+            a 3
+            a 2
+        }
+        
+        b
+    ";
+
+    let [err] = test()
+        .env("NU_BACKTRACE", 1)
+        .run(code)
+        .expect_shell_error()?
+        .into_inner()?
+        .into_chained_iter()?
+        .collect_array()
+        .unwrap();
+
+    assert_matches!(err, ShellError::EvalBlockWithInput(..));
+    let err = err.into_inner()?;
+    assert_matches!(err, ShellError::EvalBlockWithInput(..));
+    let err = err.into_inner()?;
+    assert_matches!(err, ShellError::ChainedError(..));
+    assert_eq!(err.into_inner()?.into_labeled()?.msg, "a custom error");
+    Ok(())
+}
+
+#[test]
+fn liststream_error_with_backtrace_single_stream() -> Result {
+    let code = "[1] | each { error make {msg: 'a custom err'} }";
+    let err = test()
+        .env("NU_BACKTRACE", 1)
+        .run(code)
+        .expect_shell_error()?;
+
+    assert_matches!(err, ShellError::EvalBlockWithInput(..));
+    let err = err.into_inner()?;
+    assert_matches!(err, ShellError::ChainedError(..));
+    assert_eq!(err.into_inner()?.into_labeled()?.msg, "a custom err");
+    Ok(())
 }

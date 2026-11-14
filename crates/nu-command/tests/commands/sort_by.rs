@@ -1,146 +1,124 @@
-use nu_test_support::{nu, pipeline};
+use nu_protocol::ShellError;
+use nu_test_support::prelude::*;
+use pretty_assertions::assert_matches;
 
 #[test]
-fn by_column() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open cargo_sample.toml --raw
-            | lines
-            | skip 1
-            | first 4
-            | split column "="
-            | sort-by Column1
-            | skip 1
-            | first 1
-            | get Column1
-            | str trim
-        "#
-    ));
+fn by_column() -> Result {
+    let code = r#"
+        open cargo_sample.toml --raw
+        | lines
+        | skip 1
+        | first 4
+        | split column "="
+        | sort-by column0
+        | skip 1
+        | first
+        | get column0
+        | str trim
+    "#;
 
-    assert_eq!(actual.out, "description");
+    test()
+        .cwd("tests/fixtures/formats")
+        .run(code)
+        .expect_value_eq("description")
 }
 
 #[test]
-fn by_invalid_column() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open cargo_sample.toml --raw
-            | lines
-            | skip 1
-            | first 4
-            | split column "="
-            | sort-by ColumnThatDoesNotExist
-            | skip 1
-            | first 1
-            | get Column1
-            | str trim
-        "#
-    ));
+fn by_invalid_column() -> Result {
+    let code = r#"
+        open cargo_sample.toml --raw
+        | lines
+        | skip 1
+        | first 4
+        | split column "="
+        | sort-by ColumnThatDoesNotExist
+        | skip 1
+        | first
+        | get column0
+        | str trim
+    "#;
 
-    assert!(actual.err.contains("Can not find column to sort by"));
-    assert!(actual.err.contains("invalid column"));
+    let err = test()
+        .cwd("tests/fixtures/formats")
+        .run(code)
+        .expect_shell_error()?;
+
+    assert_matches!(
+        err,
+        ShellError::CantFindColumn { col_name, .. } if col_name == "ColumnThatDoesNotExist"
+    );
+    Ok(())
 }
 
 #[test]
-fn by_invalid_types() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open cargo_sample.toml --raw
-            | echo [1 "foo"]
-            | sort-by
-        "#
-    ));
-
-    assert!(actual.err.contains("Not all values can be compared"));
-    assert!(actual
-        .err
-        .contains("Unable to sort values, as \"integer\" cannot compare against \"string\""));
+fn sort_by_empty() -> Result {
+    test()
+        .run("[] | sort-by foo")
+        .expect_value_eq(Vec::<String>::new())
 }
 
 #[test]
-fn sort_primitive_values() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open cargo_sample.toml --raw
-            | lines
-            | skip 1
-            | first 6
-            | sort-by
-            | first 1
-        "#
-    ));
-
-    assert_eq!(actual.out, "authors = [\"The Nu Project Contributors\"]");
+fn ls_sort_by_name_sensitive() -> Result {
+    test()
+        .cwd("tests/fixtures/formats")
+        .run("open sample-ls-output.json | sort-by name | select name")
+        .expect_value_eq(test_table![
+            ["name"];
+            ["B.txt"],
+            ["C"],
+            ["a.txt"],
+        ])
 }
 
 #[test]
-fn ls_sort_by_name_sensitive() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open sample-ls-output.json
-            | sort-by name
-            | select name
-            | to json
-        "#
-    ));
-
-    let json_output = r#"[{"name":"B.txt"},{"name":"C"},{"name":"a.txt"}]"#;
-
-    assert_eq!(actual.out, json_output);
+fn ls_sort_by_name_insensitive() -> Result {
+    test()
+        .cwd("tests/fixtures/formats")
+        .run("open sample-ls-output.json | sort-by -i name | select name")
+        .expect_value_eq(test_table![
+            ["name"];
+            ["a.txt"],
+            ["B.txt"],
+            ["C"],
+        ])
 }
 
 #[test]
-fn ls_sort_by_name_insensitive() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open sample-ls-output.json
-            | sort-by -i name
-            | select name
-            | to json
-        "#
-    ));
-
-    let json_output = r#"[{"name":"a.txt"},{"name":"B.txt"},{"name":"C"}]"#;
-
-    assert_eq!(actual.out, json_output);
+fn ls_sort_by_type_name_sensitive() -> Result {
+    test()
+        .cwd("tests/fixtures/formats")
+        .run("open sample-ls-output.json | sort-by type name | select name type")
+        .expect_value_eq(test_table![
+            ["name", "type"];
+            ["C", "Dir"],
+            ["B.txt", "File"],
+            ["a.txt", "File"],
+        ])
 }
 
 #[test]
-fn ls_sort_by_type_name_sensitive() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open sample-ls-output.json
-            | sort-by type name
-            | select name type
-            | to json
-        "#
-    ));
-
-    let json_output = r#"[{"name":"C","type":"Dir"},{"name":"B.txt","type":"File"},{"name":"a.txt","type":"File"}]"#;
-
-    assert_eq!(actual.out, json_output);
+fn ls_sort_by_type_name_insensitive() -> Result {
+    test()
+        .cwd("tests/fixtures/formats")
+        .run("open sample-ls-output.json | sort-by -i type name | select name type")
+        .expect_value_eq(test_table![
+            ["name", "type"];
+            ["C", "Dir"],
+            ["a.txt", "File"],
+            ["B.txt", "File"],
+        ])
 }
 
 #[test]
-fn ls_sort_by_type_name_insensitive() {
-    let actual = nu!(
-        cwd: "tests/fixtures/formats", pipeline(
-        r#"
-            open sample-ls-output.json
-            | sort-by -i type name
-            | select name type
-            | to json
-        "#
-    ));
+fn no_column_specified_fails() -> Result {
+    test()
+        .run("[2 0 1] | sort-by")
+        .expect_error_code_eq("nu::shell::missing_parameter")
+}
 
-    let json_output = r#"[{"name":"C","type":"Dir"},{"name":"a.txt","type":"File"},{"name":"B.txt","type":"File"}]"#;
-
-    assert_eq!(actual.out, json_output);
+#[test]
+fn fail_on_non_iterator() -> Result {
+    test()
+        .run("1 | sort-by")
+        .expect_error_code_eq("nu::parser::input_type_mismatch")
 }

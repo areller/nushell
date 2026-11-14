@@ -1,27 +1,86 @@
-#![recursion_limit = "2048"]
-
-#[cfg(test)]
-#[macro_use]
-extern crate indexmap;
-
-#[macro_use]
-mod prelude;
-mod classified;
-pub mod commands;
+#![cfg_attr(not(feature = "os"), allow(unused))]
+#![doc = include_str!("../README.md")]
+mod bytes;
+mod charting;
+mod conversions;
+mod date;
+mod debug;
 mod default_context;
-pub mod utils;
+mod env;
+mod experimental;
+#[cfg(feature = "os")]
+mod filesystem;
+mod filters;
+mod generators;
+mod hash;
+mod help;
+mod math;
+mod matrix;
+mod misc;
+mod network;
+mod path;
+#[cfg(feature = "os")]
+mod platform;
+mod progress_bar;
+#[cfg(feature = "rand")]
+mod random;
+mod record;
+mod semver;
+mod shells;
+mod sort_utils;
+#[cfg(feature = "sqlite")]
+mod stor;
+mod strings;
+#[cfg(feature = "os")]
+mod system;
+mod viewers;
+
+pub(crate) mod formats;
+
+pub use bytes::*;
+pub use charting::*;
+pub use conversions::*;
+pub use date::*;
+pub use debug::*;
+pub use default_context::*;
+pub use env::*;
+pub use experimental::*;
+#[cfg(feature = "os")]
+pub use filesystem::*;
+pub use filters::*;
+pub use formats::*;
+pub use generators::*;
+pub use hash::*;
+pub use help::*;
+pub use math::*;
+pub use matrix::*;
+pub use misc::*;
+pub use network::*;
+pub use path::*;
+#[cfg(feature = "os")]
+pub use platform::*;
+#[cfg(feature = "rand")]
+pub use random::*;
+pub use record::*;
+pub use semver::*;
+pub use shells::*;
+pub use sort_utils::*;
+#[cfg(feature = "sqlite")]
+pub use stor::*;
+pub use strings::*;
+#[cfg(feature = "os")]
+pub use system::*;
+pub use viewers::*;
+
+#[cfg(feature = "sqlite")]
+mod database;
+
+#[cfg(feature = "sqlite")]
+pub use database::*;
 
 #[cfg(test)]
-mod examples;
+#[macro_use]
+extern crate nu_test_support;
 
-pub use crate::default_context::create_default_context;
-pub use nu_data::config;
-pub use nu_data::dict::TaggedListBuilder;
-pub use nu_data::primitive;
-pub use nu_data::value;
-pub use nu_stream::{ActionStream, InputStream, InterruptibleStream};
-pub use nu_value_ext::ValueExt;
-pub use num_traits::cast::ToPrimitive;
-
-// TODO: Temporary redirect
-pub use nu_protocol::{did_you_mean, TaggedDictBuilder};
+#[cfg(test)]
+use nu_test_support::harness::main;

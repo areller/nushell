@@ -1,0 +1,295 @@
+use nu_engine::{ClosureEvalOnce, command_prelude::*};
+use nu_protocol::{
+    ByteStream, ByteStreamSource,
+    engine::Closure,
+    shell_error::{bridge::ShellErrorBridge, io::IoError},
+};
+#[cfg(feature = "os")]
+use nu_protocol::{
+    OutDest,
+    process::{ChildPipe, ChildProcess},
+};
+
+use std::{
+    io::{BufRead, Cursor, Read},
+    thread,
+};
+
+/// A stream that reads like `stream`, for `do --ignore-errors`, but ends where reading it fails
+/// instead of failing. Only an `exit` still comes through, since that isn't an error.
+fn ending_at_read_error(stream: ByteStream) -> ByteStream {
+    let (span, signals, type_) = (stream.span(), stream.signals().clone(), stream.type_());
+    let known_size = stream.known_size();
+    let mut reader = stream.reader();
+
+    ByteStream::from_fn(span, signals, type_, move |buffer| {
+        let Some(reader) = &mut reader else {
+            return Ok(false);
+        };
+        match reader.fill_buf() {
+            Ok(bytes) => {
+                let len = bytes.len();
+                buffer.extend_from_slice(bytes);
+                reader.consume(len);
+                Ok(len > 0)
+            }
+            Err(err) => match ShellErrorBridge::try_from(err) {
+                Ok(ShellErrorBridge(err)) if err.is_exit() => Err(err),
+                _ => Ok(false),
+            },
+        }
+    })
+    .with_known_size(known_size)
+}
+
+#[derive(Clone)]
+pub struct Do;
+
+impl Command for Do {
+    fn name(&self) -> &str {
+        "do"
+    }
+
+    fn description(&self) -> &str {
+        "Run a closure, providing it with the pipeline input."
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::build("do")
+            .required("closure", SyntaxShape::Closure(None), "The closure to run.")
+            .input_output_types(vec![(Type::Any, Type::Any)])
+            .switch(
+                "ignore-errors",
+                "Ignore errors as the closure runs.",
+                Some('i'),
+            )
+            .switch(
+                "capture-errors",
+                "Catch errors as the closure runs, and return them.",
+                Some('c'),
+            )
+            .switch(
+                "env",
+                "Keep the environment defined inside the command.",
+                None,
+            )
+            .rest(
+                "rest",
+                SyntaxShape::Any,
+                "The parameter(s) for the closure.",
+            )
+            .category(Category::Core)
+    }
+
+    fn run(
+        &self,
+        engine_state: &EngineState,
+        caller_stack: &mut Stack,
+        call: &Call,
+        input: PipelineData,
+    ) -> Result<PipelineData, ShellError> {
+        let head = call.head;
+        let closure: Closure = call.req(engine_state, caller_stack, 0)?;
+        let rest: Vec<Value> = call.rest(engine_state, caller_stack, 1)?;
+        let ignore_all_errors = call.has_flag(engine_state, caller_stack, "ignore-errors")?;
+
+        let capture_errors = call.has_flag(engine_state, caller_stack, "capture-errors")?;
+        let has_env = call.has_flag(engine_state, caller_stack, "env")?;
+
+        let result = if has_env {
+            ClosureEvalOnce::try_new_env_preserve_out_dest(
+                engine_state,
+                caller_stack,
+                closure,
+                head,
+            )?
+        } else {
+            ClosureEvalOnce::try_new_preserve_out_dest(engine_state, caller_stack, closure, head)?
+        }
+        .add_args(rest)?
+        .run_with_input(input);
+
+        match result {
+            Ok(PipelineData::ByteStream(stream, metadata)) if capture_errors => {
+                let span = stream.span();
+                #[cfg(not(feature = "os"))]
+                return Err(ShellError::DisabledOsSupport {
+                    msg: "Cannot create a thread to receive stdout message.".to_string(),
+                    span,
+                });
+
+                #[cfg(feature = "os")]
+                match stream.into_child() {
+                    Ok(mut child) => {
+                        // Use a thread to receive stdout message.
+                        // Or we may get a deadlock if child process sends out too much bytes to stderr.
+                        //
+                        // For example: in normal linux system, stderr pipe's limit is 65535 bytes.
+                        // if child process sends out 65536 bytes, the process will be hanged because no consumer
+                        // consumes the first 65535 bytes
+                        // So we need a thread to receive stdout message, then the current thread can continue to consume
+                        // stderr messages.
+                        let stdout_handler = child
+                            .stdout
+                            .take()
+                            .map(|mut stdout| {
+                                thread::Builder::new()
+                                    .name("stdout consumer".to_string())
+                                    .spawn(move || {
+                                        let mut buf = Vec::new();
+                                        stdout.read_to_end(&mut buf).map_err(|err| {
+                                            match ShellErrorBridge::try_from(err) {
+                                                Ok(ShellErrorBridge(err)) => err,
+                                                Err(err) => IoError::new_internal(
+                                                    err,
+                                                    "Could not read stdout to end",
+                                                )
+                                                .into(),
+                                            }
+                                        })?;
+                                        Ok::<_, ShellError>(buf)
+                                    })
+                                    .map_err(|err| IoError::new(err, head, None))
+                            })
+                            .transpose()?;
+
+                        // Intercept stderr so we can return it in the error if the exit code is non-zero.
+                        // The threading issues mentioned above dictate why we also need to intercept stdout.
+                        let stderr_msg = match child.stderr.take() {
+                            None => String::new(),
+                            Some(mut stderr) => {
+                                let mut buf = String::new();
+                                stderr
+                                    .read_to_string(&mut buf)
+                                    .map_err(|err| IoError::new(err, span, None))?;
+                                buf
+                            }
+                        };
+
+                        let stdout = if let Some(handle) = stdout_handler {
+                            match handle.join() {
+                                Err(err) => {
+                                    return Err(ShellError::ExternalCommand {
+                                        label: "Fail to receive external commands stdout message"
+                                            .to_string(),
+                                        help: format!("{err:?}"),
+                                        span,
+                                    });
+                                }
+                                Ok(res) => Some(res?),
+                            }
+                        } else {
+                            None
+                        };
+
+                        child.ignore_error(false);
+                        child.wait()?;
+
+                        let mut child = ChildProcess::from_raw(None, None, None, span);
+                        if let Some(stdout) = stdout {
+                            child.stdout = Some(ChildPipe::Tee(Box::new(Cursor::new(stdout))));
+                        }
+                        if !stderr_msg.is_empty() {
+                            child.stderr = Some(ChildPipe::Tee(Box::new(Cursor::new(stderr_msg))));
+                        }
+                        Ok(PipelineData::byte_stream(
+                            ByteStream::child(child, span),
+                            metadata,
+                        ))
+                    }
+                    Err(stream) => Ok(PipelineData::byte_stream(stream, metadata)),
+                }
+            }
+            Ok(PipelineData::ByteStream(mut stream, metadata)) if ignore_all_errors => {
+                #[cfg(feature = "os")]
+                if let ByteStreamSource::Child(child) = stream.source_mut() {
+                    child.ignore_stdin_errors();
+                    if !matches!(
+                        caller_stack.stdout(),
+                        OutDest::Pipe | OutDest::PipeRaw | OutDest::PipeSeparate | OutDest::Value
+                    ) {
+                        child.ignore_error(true);
+                    }
+                }
+                if matches!(stream.source(), ByteStreamSource::Read(_)) {
+                    stream = ending_at_read_error(stream);
+                }
+                Ok(PipelineData::byte_stream(stream, metadata))
+            }
+            // `exit` isn't an error, so `--ignore-errors` doesn't apply to it.
+            Err(err @ ShellError::Exit { .. }) => Err(err),
+            Ok(PipelineData::Value(Value::Error { error, .. }, ..)) if error.is_exit() => {
+                Err(*error)
+            }
+            Ok(PipelineData::Value(Value::Error { .. }, ..)) | Err(_) if ignore_all_errors => {
+                Ok(PipelineData::empty())
+            }
+            Ok(PipelineData::ListStream(stream, metadata)) if ignore_all_errors => {
+                let stream = stream.map(move |value| match &value {
+                    Value::Error { error, .. } if !error.is_exit() => Value::nothing(head),
+                    _ => value,
+                });
+                Ok(PipelineData::list_stream(stream, metadata))
+            }
+            r => r,
+        }
+    }
+
+    fn examples(&self) -> Vec<Example<'_>> {
+        vec![
+            Example {
+                description: "Run the closure.",
+                example: "do { echo hello }",
+                result: Some(Value::test_string("hello")),
+            },
+            Example {
+                description: "Run a stored first-class closure.",
+                example: r#"let text = "I am enclosed"; let hello = {|| echo $text}; do $hello"#,
+                result: Some(Value::test_string("I am enclosed")),
+            },
+            Example {
+                description: "Run the closure and ignore both shell and external program errors.",
+                example: "do --ignore-errors { thisisnotarealcommand }",
+                result: None,
+            },
+            Example {
+                description: "Abort the pipeline if a program returns a non-zero exit code.",
+                example: "do --capture-errors { nu --commands 'exit 1' } | myscarycommand",
+                result: None,
+            },
+            Example {
+                description: "Run the closure with a positional, type-checked parameter.",
+                example: "do {|x:int| 100 + $x } 77",
+                result: Some(Value::test_int(177)),
+            },
+            Example {
+                description: "Run the closure with pipeline input.",
+                example: "77 | do { 100 + $in }",
+                result: Some(Value::test_int(177)),
+            },
+            Example {
+                description: "Run the closure with a default parameter value.",
+                example: "77 | do {|x=100| $x + $in }",
+                result: Some(Value::test_int(177)),
+            },
+            Example {
+                description: "Run the closure with two positional parameters.",
+                example: "do {|x,y| $x + $y } 77 100",
+                result: Some(Value::test_int(177)),
+            },
+            Example {
+                description: "Run the closure and keep changes to the environment.",
+                example: "do --env { $env.foo = 'bar' }; $env.foo",
+                result: Some(Value::test_string("bar")),
+            },
+        ]
+    }
+}
+
+mod test {
+    #[test]
+    fn test_examples() -> nu_test_support::Result {
+        use super::Do;
+        nu_test_support::test().examples(Do)
+    }
+}

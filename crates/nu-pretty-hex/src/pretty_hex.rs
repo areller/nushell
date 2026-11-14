@@ -1,5 +1,4 @@
-use core::primitive::str;
-use core::{default::Default, fmt};
+use core::fmt;
 use nu_ansi_term::{Color, Style};
 
 /// Returns a one-line hexdump of `source` grouped in default format without header
@@ -57,10 +56,14 @@ pub struct HexConfig {
     pub group: usize,
     /// Source bytes per chunk (word). 0 for single word.
     pub chunk: usize,
+    /// Offset to start counting addresses from
+    pub address_offset: usize,
     /// Bytes from 0 to skip
     pub skip: Option<usize>,
     /// Length to return
     pub length: Option<usize>,
+    /// Colors / styling for different byte categories.
+    pub styles: HexStyles,
 }
 
 /// Default configuration with `title`, `ascii`, 16 source bytes `width` grouped to 4 separate
@@ -73,8 +76,10 @@ impl Default for HexConfig {
             width: 16,
             group: 4,
             chunk: 1,
+            address_offset: 0,
             skip: None,
             length: None,
+            styles: HexStyles::default(),
         }
     }
 }
@@ -86,8 +91,8 @@ impl HexConfig {
     }
 
     fn delimiter(&self, i: usize) -> &'static str {
-        if i > 0 && self.chunk > 0 && i % self.chunk == 0 {
-            if self.group > 0 && i % (self.group * self.chunk) == 0 {
+        if i > 0 && self.chunk > 0 && i.is_multiple_of(self.chunk) {
+            if self.group > 0 && i.is_multiple_of(self.group * self.chunk) {
                 "  "
             } else {
                 " "
@@ -107,36 +112,57 @@ impl HexConfig {
     }
 }
 
-fn categorize_byte(byte: &u8) -> (Style, Option<char>) {
-    // This section is here so later we can configure these items
-    let null_char_style = Style::default().fg(Color::Fixed(242));
+pub fn categorize_byte(byte: &u8, styles: &HexStyles) -> (Style, Option<char>) {
     let null_char = Some('0');
-    let ascii_printable_style = Style::default().fg(Color::Cyan).bold();
     let ascii_printable = None;
-    let ascii_space_style = Style::default().fg(Color::Green).bold();
     let ascii_space = Some(' ');
-    let ascii_white_space_style = Style::default().fg(Color::Green).bold();
-    let ascii_white_space = Some('_');
-    let ascii_other_style = Style::default().fg(Color::Purple).bold();
+    let ascii_whitespace = Some('_');
     let ascii_other = Some('•');
-    let non_ascii_style = Style::default().fg(Color::Yellow).bold();
     let non_ascii = Some('×'); // or Some('.')
 
     if byte == &0 {
-        (null_char_style, null_char)
+        (styles.null_char, null_char)
     } else if byte.is_ascii_graphic() {
-        (ascii_printable_style, ascii_printable)
+        (styles.printable, ascii_printable)
     } else if byte.is_ascii_whitespace() {
         // 0x20 == 32 decimal - replace with a real space
         if byte == &32 {
-            (ascii_space_style, ascii_space)
+            (styles.whitespace, ascii_space)
         } else {
-            (ascii_white_space_style, ascii_white_space)
+            (styles.whitespace, ascii_whitespace)
         }
     } else if byte.is_ascii() {
-        (ascii_other_style, ascii_other)
+        (styles.ascii_other, ascii_other)
     } else {
-        (non_ascii_style, non_ascii)
+        (styles.non_ascii, non_ascii)
+    }
+}
+
+/// Style parameters for hexdump. These styles will be applied both to the hex representation
+/// and the corresponding ASCII character (or placeholder, for non-printable bytes).
+#[derive(Clone, Copy, Debug)]
+pub struct HexStyles {
+    /// Style for null bytes (`\0`).
+    pub null_char: Style,
+    /// Style for non-whitespace printable ASCII characters.
+    pub printable: Style,
+    /// Style for whitespace printable ASCII characters.
+    pub whitespace: Style,
+    /// Style for other ASCII characters (e.g. control characters).
+    pub ascii_other: Style,
+    /// Style for non-ASCII characters (i.e. `0x80..`).
+    pub non_ascii: Style,
+}
+
+impl Default for HexStyles {
+    fn default() -> Self {
+        Self {
+            null_char: Style::default().fg(Color::Fixed(242)),
+            printable: Style::default().fg(Color::Cyan).bold(),
+            whitespace: Style::default().fg(Color::Green).bold(),
+            ascii_other: Style::default().fg(Color::Purple).bold(),
+            non_ascii: Style::default().fg(Color::Yellow).bold(),
+        }
     }
 }
 
@@ -157,36 +183,29 @@ where
         return Ok(());
     }
 
-    let amount = match cfg.length {
-        Some(len) => len,
-        None => source.as_ref().len(),
-    };
+    let amount = cfg.length.unwrap_or_else(|| source.as_ref().len());
 
     let skip = cfg.skip.unwrap_or(0);
+
+    let address_offset = cfg.address_offset;
 
     let source_part_vec: Vec<u8> = source
         .as_ref()
         .iter()
         .skip(skip)
         .take(amount)
-        .map(|&x| x as u8)
+        .copied()
         .collect();
 
     if cfg.title {
-        if use_color {
-            writeln!(
-                writer,
-                "Length: {0} (0x{0:x}) bytes | {1}printable {2}whitespace {3}ascii_other {4}non_ascii{5}",
-                source_part_vec.len(),
-                Style::default().fg(Color::Cyan).bold().prefix(),
-                Style::default().fg(Color::Green).bold().prefix(),
-                Style::default().fg(Color::Purple).bold().prefix(),
-                Style::default().fg(Color::Yellow).bold().prefix(),
-                Style::default().fg(Color::Yellow).suffix()
-            )?;
-        } else {
-            writeln!(writer, "Length: {0} (0x{0:x}) bytes", source_part_vec.len(),)?;
-        }
+        write_title(
+            writer,
+            HexConfig {
+                length: Some(source_part_vec.len()),
+                ..cfg
+            },
+            use_color,
+        )?;
     }
 
     let lines = source_part_vec.chunks(if cfg.width > 0 {
@@ -205,16 +224,16 @@ where
                     writer,
                     "{}{:08x}{}:   ",
                     style.prefix(),
-                    i * cfg.width + skip,
+                    i * cfg.width + skip + address_offset,
                     style.suffix()
                 )?;
             } else {
-                write!(writer, "{:08x}:   ", i * cfg.width + skip,)?;
+                write!(writer, "{:08x}:   ", i * cfg.width + skip + address_offset,)?;
             }
         }
         for (i, x) in row.as_ref().iter().enumerate() {
             if use_color {
-                let (style, _char) = categorize_byte(x);
+                let (style, _char) = categorize_byte(x, &cfg.styles);
                 write!(
                     writer,
                     "{}{}{:02x}{}",
@@ -233,11 +252,8 @@ where
             }
             write!(writer, "   ")?;
             for x in row {
-                let (style, a_char) = categorize_byte(x);
-                let replacement_char = match a_char {
-                    Some(c) => c,
-                    None => *x as char,
-                };
+                let (style, a_char) = categorize_byte(x, &cfg.styles);
+                let replacement_char = a_char.unwrap_or(*x as char);
                 if use_color {
                     write!(
                         writer,
@@ -247,7 +263,7 @@ where
                         style.suffix()
                     )?;
                 } else {
-                    write!(writer, "{}", replacement_char,)?;
+                    write!(writer, "{replacement_char}",)?;
                 }
             }
         }
@@ -256,6 +272,34 @@ where
         }
     }
     Ok(())
+}
+
+/// Write the title for the given config. The length will be taken from `cfg.length`.
+pub fn write_title<W>(writer: &mut W, cfg: HexConfig, use_color: bool) -> Result<(), fmt::Error>
+where
+    W: fmt::Write,
+{
+    let write = |writer: &mut W, length: fmt::Arguments<'_>| {
+        if use_color {
+            writeln!(
+                writer,
+                "Length: {length} | {} {} {} {} {}",
+                cfg.styles.null_char.paint("null_char"),
+                cfg.styles.printable.paint("printable"),
+                cfg.styles.whitespace.paint("whitespace"),
+                cfg.styles.ascii_other.paint("ascii_other"),
+                cfg.styles.non_ascii.paint("non_ascii"),
+            )
+        } else {
+            writeln!(writer, "Length: {length}")
+        }
+    };
+
+    if let Some(len) = cfg.length {
+        write(writer, format_args!("{len} (0x{len:x}) bytes"))
+    } else {
+        write(writer, format_args!("unknown (stream)"))
+    }
 }
 
 /// Reference wrapper for use in arguments formatting.
@@ -279,21 +323,21 @@ impl<'a, T: 'a + AsRef<[u8]>> fmt::Debug for Hex<'a, T> {
 pub trait PrettyHex: Sized {
     /// Wrap self reference for use in `std::fmt::Display` and `std::fmt::Debug`
     /// formatting as hex dumps.
-    fn hex_dump(&self) -> Hex<Self>;
+    fn hex_dump(&self) -> Hex<'_, Self>;
 
     /// Wrap self reference for use in `std::fmt::Display` and `std::fmt::Debug`
     /// formatting as hex dumps in specified format.
-    fn hex_conf(&self, cfg: HexConfig) -> Hex<Self>;
+    fn hex_conf(&self, cfg: HexConfig) -> Hex<'_, Self>;
 }
 
 impl<T> PrettyHex for T
 where
     T: AsRef<[u8]>,
 {
-    fn hex_dump(&self) -> Hex<Self> {
+    fn hex_dump(&self) -> Hex<'_, Self> {
         Hex(self, HexConfig::default())
     }
-    fn hex_conf(&self, cfg: HexConfig) -> Hex<Self> {
+    fn hex_conf(&self, cfg: HexConfig) -> Hex<'_, Self> {
         Hex(self, cfg)
     }
 }

@@ -2,16 +2,16 @@
 //!
 //! This module provides for Hjson deserialization with the type `Deserializer`.
 
-use std::char;
-use std::io;
-use std::marker::PhantomData;
-use std::str;
-
-use serde::de;
-
 use super::error::{Error, ErrorCode, Result};
 use super::util::StringReader;
 use super::util::{Number, ParseNumber};
+use serde::de;
+use std::{
+    char, io,
+    io::{BufReader, Read},
+    marker::PhantomData,
+    str,
+};
 
 enum State {
     Normal,
@@ -25,15 +25,6 @@ pub struct Deserializer<Iter: Iterator<Item = u8>> {
     str_buf: Vec<u8>,
     state: State,
 }
-
-// macro_rules! try_or_invalid {
-//     ($self_:expr, $e:expr) => {
-//         match $e {
-//             Some(v) => v,
-//             None => { return Err($self_.error(ErrorCode::InvalidNumber)); }
-//         }
-//     }
-// }
 
 impl<Iter> Deserializer<Iter>
 where
@@ -70,7 +61,7 @@ where
         }
     }
 
-    fn is_punctuator_char(&mut self, ch: u8) -> bool {
+    fn is_punctuator_char(&self, ch: u8) -> bool {
         matches!(ch, b'{' | b'}' | b'[' | b']' | b',' | b':')
     }
 
@@ -268,9 +259,9 @@ where
                         }
                     }
                     _ => {
-                        if chf == b'-' || (b'0'..=b'9').contains(&chf) {
-                            let mut pn = ParseNumber::new(self.str_buf.iter().copied());
-                            match pn.parse(false) {
+                        if chf == b'-' || chf.is_ascii_digit() {
+                            let mut parser = ParseNumber::new(self.str_buf.iter().copied());
+                            match parser.parse(false) {
                                 Ok(Number::F64(v)) => {
                                     self.rdr.uneat_char(ch);
                                     return visitor.visit_f64(v);
@@ -466,10 +457,10 @@ where
                                             .error(ErrorCode::LoneLeadingSurrogateInHexEscape));
                                     }
 
-                                    let n = (((n1 - 0xD800) as u32) << 10 | (n2 - 0xDC00) as u32)
+                                    let n = ((((n1 - 0xD800) as u32) << 10) | (n2 - 0xDC00) as u32)
                                         + 0x1_0000;
 
-                                    match char::from_u32(n as u32) {
+                                    match char::from_u32(n) {
                                         Some(c) => c,
                                         None => {
                                             return Err(self
@@ -514,7 +505,7 @@ where
     }
 }
 
-impl<'de, 'a, Iter> de::Deserializer<'de> for &'a mut Deserializer<Iter>
+impl<'de, Iter> de::Deserializer<'de> for &mut Deserializer<Iter>
 where
     Iter: Iterator<Item = u8>,
 {
@@ -574,7 +565,7 @@ impl<'a, Iter: Iterator<Item = u8>> SeqVisitor<'a, Iter> {
     }
 }
 
-impl<'de, 'a, Iter> de::SeqAccess<'de> for SeqVisitor<'a, Iter>
+impl<'de, Iter> de::SeqAccess<'de> for SeqVisitor<'_, Iter>
 where
     Iter: Iterator<Item = u8>,
 {
@@ -625,7 +616,7 @@ impl<'a, Iter: Iterator<Item = u8>> MapVisitor<'a, Iter> {
     }
 }
 
-impl<'de, 'a, Iter> de::MapAccess<'de> for MapVisitor<'a, Iter>
+impl<'de, Iter> de::MapAccess<'de> for MapVisitor<'_, Iter>
 where
     Iter: Iterator<Item = u8>,
 {
@@ -680,7 +671,7 @@ where
     }
 }
 
-impl<'de, 'a, Iter> de::VariantAccess<'de> for &'a mut Deserializer<Iter>
+impl<'de, Iter> de::VariantAccess<'de> for &mut Deserializer<Iter>
 where
     Iter: Iterator<Item = u8>,
 {
@@ -813,7 +804,10 @@ where
     R: io::Read,
     T: de::DeserializeOwned,
 {
-    from_iter(rdr.bytes())
+    // Use a buffered reader so that calling `.bytes()` is efficient and
+    // doesn't trigger clippy's `unbuffered_bytes` lint when the input
+    // comes from a non-memory source.
+    from_iter(BufReader::new(rdr).bytes())
 }
 
 /// Decodes a Hjson value from a byte slice `&[u8]`.

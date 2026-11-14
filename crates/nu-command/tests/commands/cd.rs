@@ -1,458 +1,370 @@
-use nu_test_support::fs::{Stub::EmptyFile, Stub::FileWithContent};
-use nu_test_support::nu;
-use nu_test_support::playground::Playground;
-use std::path::PathBuf;
+use nu_protocol::shell_error;
+use nu_test_support::{fs::Stub::EmptyFile, prelude::*};
 
 #[test]
-fn filesystem_change_from_current_directory_using_relative_path() {
+fn cd_works_with_in_var() -> Result {
     Playground::setup("cd_test_1", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.root(),
-            r#"
-                cd cd_test_1
-                echo (pwd)
-            "#
-        );
+        let code = r#"
+            "cd_test_1"
+            | cd $in; $env.PWD
+            | path split
+            | last
+        "#;
 
-        assert_eq!(PathBuf::from(actual.out), *dirs.test());
+        test()
+            .cwd(dirs.root())
+            .run(code)
+            .expect_value_eq("cd_test_1")
+    })
+}
+
+/// The drive letter `dir` is on, e.g. `C`.
+#[cfg(windows)]
+fn drive_letter(dir: &std::path::Path) -> char {
+    use std::path::{Component, Prefix};
+    match dir.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter as char,
+            other => panic!("{dir:?} is not on a drive: {other:?}"),
+        },
+        _ => panic!("{dir:?} has no prefix"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn cd_bare_drive_on_current_drive_stays() -> Result {
+    Playground::setup("cd_bare_drive", |dirs, _| {
+        let drive = drive_letter(dirs.test().as_std_path());
+        for input in [
+            format!("cd {}:", drive.to_ascii_lowercase()),
+            format!("cd {}:", drive.to_ascii_uppercase()),
+            format!("cd \"{drive}:	\""),
+            format!("cd -P {drive}:"),
+        ] {
+            test()
+                .cwd(dirs.test())
+                .run(format!("{input}; $env.PWD"))
+                .expect_value_eq(dirs.test())?;
+        }
+        Ok(())
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn cd_drive_relative_path_on_current_drive() -> Result {
+    Playground::setup("cd_drive_relative", |dirs, sandbox| {
+        sandbox.mkdir("foo");
+        let drive = drive_letter(dirs.test().as_std_path());
+
+        test()
+            .cwd(dirs.test())
+            .run(format!("cd {drive}:foo; $env.PWD"))
+            .expect_value_eq(dirs.test().join("foo"))?;
+
+        test()
+            .cwd(dirs.test().join("foo"))
+            .run(format!("cd {drive}:..; $env.PWD"))
+            .expect_value_eq(dirs.test())
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn cd_missing_drive_reports_input() -> Result {
+    let Some(drive) = ('A'..='Z')
+        .rev()
+        .find(|letter| !std::path::Path::new(&format!("{letter}:\\")).exists())
+    else {
+        return Ok(());
+    };
+    let err = test().run(format!("cd {drive}:")).expect_io_error()?;
+    assert_eq!(err.path.unwrap().to_string_lossy(), format!("{drive}:"));
+    assert!(matches!(
+        err.kind,
+        nu_protocol::shell_error::io::ErrorKind::DirectoryNotFound
+    ));
+    Ok(())
+}
+
+#[test]
+fn filesystem_change_from_current_directory_using_relative_path() -> Result {
+    Playground::setup("cd_test_1", |dirs, _| {
+        test()
+            .cwd(dirs.root())
+            .run("cd cd_test_1; $env.PWD")
+            .expect_value_eq(dirs.test())
     })
 }
 
 #[test]
-fn filesystem_change_from_current_directory_using_absolute_path() {
+fn filesystem_change_from_current_directory_using_relative_path_with_trailing_slash() -> Result {
+    Playground::setup("cd_test_1_slash", |dirs, _| {
+        // Intentionally not using correct path sep because this should work on Windows
+        test()
+            .cwd(dirs.root())
+            .run("cd cd_test_1_slash/; $env.PWD")
+            .expect_value_eq(dirs.test())
+    })
+}
+
+#[test]
+fn filesystem_change_from_current_directory_using_absolute_path() -> Result {
     Playground::setup("cd_test_2", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                cd "{}"
-                echo (pwd)
-            "#,
-            dirs.formats()
-        );
-
-        assert_eq!(PathBuf::from(actual.out), dirs.formats());
+        test()
+            .cwd(dirs.test())
+            .run_with_data("cd $in; $env.PWD", dirs.formats())
+            .expect_value_eq(dirs.formats())
     })
 }
 
 #[test]
-fn filesystem_switch_back_to_previous_working_directory() {
+fn filesystem_change_from_current_directory_using_absolute_path_with_trailing_slash() -> Result {
+    Playground::setup("cd_test_2", |dirs, _| {
+        let mut dir = dirs.formats().to_string_lossy().into_owned();
+        // Keep this portable: Windows expects `\` while Unix expects `/`.
+        if !dir.ends_with(std::path::MAIN_SEPARATOR) {
+            dir.push(std::path::MAIN_SEPARATOR);
+        }
+
+        test()
+            .cwd(dirs.test())
+            .run_with_data("cd $in; $env.PWD", dir)
+            .expect_value_eq(dirs.formats())
+    })
+}
+
+#[test]
+fn filesystem_switch_back_to_previous_working_directory() -> Result {
     Playground::setup("cd_test_3", |dirs, sandbox| {
         sandbox.mkdir("odin");
+        let odin_path = dirs.test().join("odin");
 
-        let actual = nu!(
-            cwd: dirs.test().join("odin"),
-            r#"
-                cd {}
-                cd -
-                echo (pwd)
-            "#,
-            dirs.test()
-        );
-
-        assert_eq!(PathBuf::from(actual.out), dirs.test().join("odin"));
+        test()
+            .cwd(&odin_path)
+            .run_with_data("cd $in; cd -; $env.PWD", dirs.test())
+            .expect_value_eq(odin_path)
     })
 }
 
 #[test]
-fn filesytem_change_from_current_directory_using_relative_path_and_dash() {
+fn filesystem_change_from_current_directory_using_relative_path_and_dash() -> Result {
     Playground::setup("cd_test_4", |dirs, sandbox| {
         sandbox.within("odin").mkdir("-");
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                cd odin/-
-                echo (pwd)
-            "#
-        );
-
-        assert_eq!(
-            PathBuf::from(actual.out),
-            dirs.test().join("odin").join("-")
-        );
+        let odin_path = dirs.test().join("odin").join("-");
+        test()
+            .cwd(dirs.test())
+            .run("cd odin/-; $env.PWD")
+            .expect_value_eq(odin_path)
     })
 }
 
 #[test]
-fn filesystem_change_current_directory_to_parent_directory() {
+fn filesystem_change_current_directory_to_parent_directory() -> Result {
     Playground::setup("cd_test_5", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                cd ..
-                echo (pwd)
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), *dirs.root());
+        test()
+            .cwd(dirs.test())
+            .run("cd ..; $env.PWD")
+            .expect_value_eq(dirs.root())
     })
 }
 
 #[test]
-fn filesystem_change_current_directory_to_two_parents_up_using_multiple_dots() {
+fn filesystem_change_current_directory_to_two_parents_up_using_multiple_dots() -> Result {
     Playground::setup("cd_test_6", |dirs, sandbox| {
         sandbox.within("foo").mkdir("bar");
-
-        let actual = nu!(
-            cwd: dirs.test().join("foo/bar"),
-            r#"
-                cd ...
-                echo (pwd)
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), *dirs.test());
+        test()
+            .cwd(dirs.test().join("foo").join("bar"))
+            .run("cd ...; $env.PWD")
+            .expect_value_eq(dirs.test())
     })
 }
 
 #[test]
-fn filesystem_change_current_directory_to_parent_directory_after_delete_cwd() {
-    Playground::setup("cd_test_7", |dirs, sandbox| {
-        sandbox.within("foo").mkdir("bar");
-
-        let actual = nu!(
-            cwd: dirs.test().join("foo/bar"),
-            r#"
-                rm {}/foo/bar
-                echo ","
-                cd ..
-                echo (pwd)
-            "#,
-            dirs.test()
-        );
-
-        let actual = actual.out.split(',').nth(1).unwrap();
-
-        assert_eq!(PathBuf::from(actual), *dirs.test().join("foo"));
-    })
-}
-
-#[test]
-fn filesystem_change_to_home_directory() {
+fn filesystem_change_to_home_directory() -> Result {
     Playground::setup("cd_test_8", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                cd ~
-                echo (pwd)
-            "#
-        );
-
-        assert_eq!(Some(PathBuf::from(actual.out)), dirs_next::home_dir());
+        test()
+            .cwd(dirs.test())
+            .run("cd ~; $env.PWD")
+            .expect_value_eq(dirs::home_dir())
     })
 }
 
 #[test]
-fn filesystem_change_to_a_directory_containing_spaces() {
+fn filesystem_change_to_a_directory_containing_spaces() -> Result {
     Playground::setup("cd_test_9", |dirs, sandbox| {
         sandbox.mkdir("robalino turner katz");
+        test()
+            .cwd(dirs.test())
+            .run("cd 'robalino turner katz'; $env.PWD")
+            .expect_value_eq(dirs.test().join("robalino turner katz"))
+    })
+}
 
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                cd "robalino turner katz"
-                echo (pwd)
-            "#
-        );
+#[test]
+fn filesystem_not_a_directory() -> Result {
+    Playground::setup("cd_test_10", |dirs, sandbox| {
+        sandbox.with_files(&[EmptyFile("ferris_did_it.txt")]);
+
+        let err = test()
+            .cwd(dirs.test())
+            .run("cd ferris_did_it.txt")
+            .expect_io_error()?;
+
+        assert_eq!(err.path.unwrap(), dirs.test().join("ferris_did_it.txt"));
+        assert!(matches!(
+            err.kind,
+            shell_error::io::ErrorKind::Std(std::io::ErrorKind::NotADirectory, ..)
+        ));
+
+        Ok(())
+    })
+}
+
+#[test]
+fn filesystem_directory_not_found() -> Result {
+    Playground::setup("cd_test_11", |dirs, _| {
+        let err = test()
+            .cwd(dirs.test())
+            .run("cd dir_that_does_not_exist")
+            .expect_io_error()?;
 
         assert_eq!(
-            PathBuf::from(actual.out),
-            dirs.test().join("robalino turner katz")
+            err.path.unwrap().to_string_lossy(),
+            "dir_that_does_not_exist"
         );
+        assert!(matches!(
+            err.kind,
+            nu_protocol::shell_error::io::ErrorKind::DirectoryNotFound
+        ));
+
+        Ok(())
     })
 }
 
 #[test]
-fn filesystem_not_a_directory() {
-    Playground::setup("cd_test_10", |dirs, sandbox| {
-        sandbox.with_files(vec![EmptyFile("ferris_did_it.txt")]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            "cd ferris_did_it.txt"
-        );
-
-        assert!(
-            actual.err.contains("ferris_did_it.txt"),
-            "actual={:?}",
-            actual.err
-        );
-        assert!(
-            actual.err.contains("is not a directory"),
-            "actual={:?}",
-            actual.err
-        );
-    })
-}
-
-#[test]
-fn filesystem_directory_not_found() {
-    Playground::setup("cd_test_11", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.test(),
-            "cd dir_that_does_not_exist"
-
-        );
-
-        assert!(
-            actual.err.contains("dir_that_does_not_exist"),
-            "actual={:?}",
-            actual.err
-        );
-        assert!(
-            actual.err.contains("directory not found"),
-            "actual={:?}",
-            actual.err
-        );
-    })
-}
-
-#[test]
-fn filesystem_change_directory_to_symlink_relative() {
+fn filesystem_change_directory_to_symlink_relative() -> Result {
     Playground::setup("cd_test_12", |dirs, sandbox| {
         sandbox.mkdir("foo");
         sandbox.mkdir("boo");
         sandbox.symlink("foo", "foo_link");
 
-        let actual = nu!(
-            cwd: dirs.test().join("boo"),
-            r#"
-                cd ../foo_link
-                echo (pwd)
-            "#
-        );
+        test()
+            .cwd(dirs.test().join("boo"))
+            .run("cd ../foo_link; $env.PWD")
+            .expect_value_eq(dirs.test().join("foo_link"))?;
 
-        assert_eq!(PathBuf::from(actual.out), dirs.test().join("foo"));
+        test()
+            .cwd(dirs.test().join("boo"))
+            .run("cd -P ../foo_link; $env.PWD")
+            .expect_value_eq(dirs.test().join("foo"))?;
+
+        Ok(())
     })
 }
 
-#[test]
-fn valuesystem_change_from_current_path_using_relative_path() {
-    Playground::setup("cd_test_13", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContent(
-            "sample.toml",
-            r#"
-                    [[bin]]
-                    path = "src/plugins/turner.rs"
-
-                    [[bin]]
-                    path = "src/plugins/robalino.rs"
-
-                    [[bin]]
-                    path = "src/plugins/katz.rs"
-                "#,
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd bin
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), PathBuf::from("/bin"));
-    })
-}
-
-#[test]
-fn valuesystem_change_from_current_path_using_absolute_path() {
-    Playground::setup("cd_test_14", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContent(
-            "sample.toml",
-            r#"
-                    [dependencies]
-                    turner-ts = "0.1.1"
-                    robalino-tkd = "0.0.1"
-                    katz-ember = "0.2.3"
-
-                    [[bin]]
-                    path = "src/plugins/arepa.rs"
-
-                    [[bin]]
-                    path = "src/plugins/bbq.rs"
-                "#,
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd bin
-                cd /dependencies
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), PathBuf::from("/dependencies"));
-    })
-}
-
-#[test]
-fn valuesystem_switch_back_to_previous_working_path() {
-    Playground::setup("cd_test_15", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContent(
-            "sample.toml",
-            r#"
-                    [dependencies]
-                    turner-ts = "0.1.1"
-                    robalino-tkd = "0.0.1"
-                    katz-ember = "0.2.3"
-                    odin-gf = "0.2.1"
-
-                    [[bin]]
-                    path = "src/plugins/arepa.rs"
-
-                    [[bin]]
-                    path = "src/plugins/bbq.rs"
-                "#,
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd dependencies
-                cd /bin
-                cd -
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), PathBuf::from("/dependencies"));
-    })
-}
-
-#[test]
-fn valuesystem_change_from_current_path_using_relative_path_and_dash() {
-    Playground::setup("cd_test_16", |dirs, sandbox| {
-        sandbox
-            .with_files(vec![FileWithContent(
-                "sample.toml",
-                r#"
-                    [package]
-                    - = ["Yehuda Katz <wycats@gmail.com>", "Jonathan Turner <jonathan.d.turner@gmail.com>", "Andrés N. Robalino <andres@androbtech.com>"]
-
-                    [[bin]]
-                    path = "src/plugins/arepa.rs"
-
-                    [[bin]]
-                    path = "src/plugins/bbq.rs"
-                "#
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd package/-
-                cd /bin
-                cd -
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), PathBuf::from("/package/-"));
-    })
-}
-
-#[test]
-fn valuesystem_change_current_path_to_parent_path() {
-    Playground::setup("cd_test_17", |dirs, sandbox| {
-        sandbox
-            .with_files(vec![FileWithContent(
-                "sample.toml",
-                r#"
-                    [package]
-                    emberenios = ["Yehuda Katz <wycats@gmail.com>", "Jonathan Turner <jonathan.d.turner@gmail.com>", "Andrés N. Robalino <andres@androbtech.com>"]
-                "#
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd package/emberenios
-                cd ..
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(PathBuf::from(actual.out), PathBuf::from("/package"));
-    })
-}
-
-#[test]
-fn valuesystem_change_to_a_path_containing_spaces() {
-    Playground::setup("cd_test_18", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContent(
-            "sample.toml",
-            r#"
-                    ["pa que te"]
-                    el = "pollo loco"
-                "#,
-        )]);
-
-        let actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                enter sample.toml
-                cd "pa que te"
-                pwd
-                exit
-            "#
-        );
-
-        assert_eq!(
-            PathBuf::from(actual.out),
-            PathBuf::from("/").join("pa que te")
-        );
-    })
-}
-
-#[test]
-fn valuesystem_path_not_found() {
-    Playground::setup("cd_test_19", |dirs, _| {
-        let actual = nu!(
-            cwd: dirs.formats(),
-            r#"
-            enter cargo_sample.toml
-            cd im_a_path_that_does_not_exist
-            exit
-        "#
-        );
-
-        assert!(actual.err.contains("Can not change to path inside"));
-        assert!(actual.err.contains("No such path exists"));
-    })
-}
-
+// FIXME: jt: needs more work
+#[ignore]
 #[cfg(target_os = "windows")]
 #[test]
-fn test_change_windows_drive() {
+fn test_change_windows_drive() -> Result {
     Playground::setup("cd_test_20", |dirs, sandbox| {
         sandbox.mkdir("test_folder");
 
-        let _actual = nu!(
-            cwd: dirs.test(),
-            r#"
-                subst Z: test_folder
-                Z:
-                echo "some text" | save test_file.txt
-                cd ~
-                subst Z: /d
-            "#
+        let code = r#"
+            subst Z: test_folder
+            Z:
+            echo "some text" | save test_file.txt
+            cd ~
+            subst Z: /d
+        "#;
+
+        let _: () = test().cwd(dirs.test()).run(code)?;
+        assert!(
+            dirs.test()
+                .join("test_folder")
+                .join("test_file.txt")
+                .exists()
         );
-        assert!(dirs
-            .test()
-            .join("test_folder")
-            .join("test_file.txt")
-            .exists());
+
+        Ok(())
     })
+}
+
+#[cfg(unix)]
+#[test]
+fn cd_permission_denied_folder() -> Result {
+    Playground::setup("cd_test_21", |dirs, sandbox| {
+        sandbox.mkdir("banned");
+        let code = "
+            chmod -x banned
+            cd banned
+        ";
+        let err = test()
+            .inherit_path()
+            .cwd(dirs.test())
+            .run(code)
+            .expect_io_error()?;
+        assert!(matches!(
+            err.kind,
+            nu_protocol::shell_error::io::ErrorKind::Std(std::io::ErrorKind::PermissionDenied, ..)
+        ));
+        let cleanup = "
+            chmod +x banned
+            rm banned
+        ";
+        let _: () = test().inherit_path().cwd(dirs.test()).run(cleanup)?;
+        Ok(())
+    })
+}
+
+// FIXME: cd_permission_denied_folder on windows
+#[ignore]
+#[cfg(windows)]
+#[test]
+fn cd_permission_denied_folder() -> Result {
+    Playground::setup("cd_test_21", |dirs, sandbox| {
+        sandbox.mkdir("banned");
+        let code = r"
+            icacls banned /deny BUILTIN\Administrators:F
+            cd banned
+        ";
+        let err = test().cwd(dirs.test()).run(code).expect_shell_error()?;
+        assert_contains("Folder is not able to read", err.to_string());
+        Ok(())
+    })
+}
+
+#[test]
+#[deps(NU)]
+#[cfg(unix)]
+fn pwd_recovery() -> Result {
+    let nu = NU.path().display().to_string();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmpdir = std::env::temp_dir()
+        .join(format!("nu_pwd_recovery_{}_{}", std::process::id(), unique))
+        .display()
+        .to_string();
+
+    let ctx = test_record! {
+        "tmpdir" => tmpdir,
+        "nu" => nu,
+    };
+    // We `cd` into a temporary directory, then spawn another `nu` process to
+    // delete that directory. Then we attempt to recover by running `cd /`.
+    let code = r#"
+        let ctx = $in
+
+        mkdir $ctx.tmpdir
+        cd $ctx.tmpdir
+        ^$ctx.nu -c $"cd /; rm -r '($ctx.tmpdir)'"
+        cd /
+        pwd
+    "#;
+
+    test().run_with_data(code, ctx).expect_value_eq("/")
 }

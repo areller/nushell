@@ -1,43 +1,73 @@
 [package]
-authors = ["The Nu Project Contributors"]
-description = "CLI for nushell"
-edition = "2018"
-license = "MIT"
+authors.workspace = true
+description = "CLI-related functionality for Nushell"
+repository = "https://github.com/nushell/nushell/tree/main/crates/nu-cli"
+edition.workspace = true
+license.workspace = true
 name = "nu-cli"
-version = "0.40.0"
-build = "build.rs"
+rust-version.workspace = true
+version.workspace = true
+autotests = false
 
 [lib]
-doctest = false
+bench = false
+harness = false
+
+[[test]]
+name = "tests"
+path = "tests/main.rs"
+harness = false
+
+[dev-dependencies]
+nu-cmd-lang = { workspace = true, features = ["os"] }
+nu-command = { workspace = true, features = ["os"] }
+nu-std.workspace = true
+nu-test-support = { path = "../nu-test-support", features = ["os"] }
+rstest = { workspace = true, default-features = false }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
 
 [dependencies]
-nu-completion = { version = "0.40.0", path="../nu-completion" }
-nu-command = { version = "0.40.0", path="../nu-command" }
-nu-data = { version = "0.40.0", path="../nu-data" }
-nu-engine = { version = "0.40.0", path="../nu-engine" }
-nu-errors = { version = "0.40.0", path="../nu-errors" }
-nu-parser = { version = "0.40.0", path="../nu-parser" }
-nu-protocol = { version = "0.40.0", path="../nu-protocol" }
-nu-source = { version = "0.40.0", path="../nu-source" }
-nu-stream = { version = "0.40.0", path="../nu-stream" }
-nu-ansi-term = { version = "0.40.0", path="../nu-ansi-term" }
-nu-path = { version = "0.40.0", path="../nu-path" }
+nu-cmd-base.workspace = true
+nu-command = { workspace = true, features = ["os"] }
+nu-engine = { workspace = true, features = ["os"] }
+nu-glob.workspace = true
+nu-path.workspace = true
+nu-parser.workspace = true
+nu-plugin-engine = { workspace = true, optional = true }
+nu-protocol = { workspace = true, features = ["os"] }
+nu-config.workspace = true
+nu-utils.workspace = true
+nu-color-config.workspace = true
+nu-experimental.workspace = true
+nu-ansi-term.workspace = true
+reedline = { workspace = true, features = ["bashisms"] }
 
-indexmap ="1.6.1"
-log = "0.4.14"
-pretty_env_logger = "0.4.0"
-strip-ansi-escapes = "0.1.0"
-rustyline = { version="9.0.0", optional=true }
-ctrlc = { version="3.1.7", optional=true }
-shadow-rs = { version = "0.8.1", default-features = false, optional = true }
-serde = { version="1.0.123", features=["derive"] }
-serde_yaml = "0.8.16"
-lazy_static = "1.4.0"
-
-[build-dependencies]
-shadow-rs = "0.8.1"
+chrono = { default-features = false, features = ["std"], workspace = true }
+crossterm = { workspace = true }
+fancy-regex = { workspace = true }
+is_executable = { workspace = true }
+log = { workspace = true }
+lru = { workspace = true }
+lscolors = { workspace = true, default-features = false, features = ["nu-ansi-term"] }
+miette = { workspace = true, features = ["fancy-no-backtrace"] }
+nucleo-matcher = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
+sysinfo = { workspace = true }
+strum = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+which = { workspace = true }
 
 [features]
-default = ["shadow-rs"]
-rustyline-support = ["rustyline", "nu-engine/rustyline-support"]
-stable = []
+plugin = ["nu-plugin-engine"]
+system-clipboard = ["reedline/system_clipboard"]
+sqlite = ["reedline/sqlite", "nu-protocol/sqlite", "nu-command/sqlite"]
+
+[lints]
+workspace = true

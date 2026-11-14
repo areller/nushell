@@ -1,15 +1,44 @@
-#[macro_use]
-extern crate derive_new;
-
-mod errors;
-mod flag;
+#![doc = include_str!("../README.md")]
+mod deparse;
+mod exportable;
+mod flatten;
+mod known_external;
 mod lex;
-mod parse;
-mod scope;
-mod shapes;
+mod lex_once;
+mod lite_parser;
+mod parse_alias;
+mod parse_bindings;
+mod parse_calls;
+mod parse_captures_compile;
+mod parse_def;
+mod parse_expressions;
+mod parse_helpers;
+mod parse_keywords;
+mod parse_literals;
+mod parse_module;
+mod parse_patterns;
+mod parse_pipelines;
+mod parse_shape_specs;
+mod parse_signatures;
+mod parse_source;
+mod parse_type_alias;
+mod parser;
+mod type_check;
 
-pub use lex::lexer::{lex, parse_block, NewlineMode};
-pub use lex::tokens::{LiteBlock, LiteCommand, LiteGroup, LitePipeline};
-pub use parse::{classify_block, garbage, parse, parse_full_column_path, parse_math_expression};
-pub use scope::ParserScope;
-pub use shapes::shapes;
+pub use deparse::escape_for_script_arg;
+pub use flatten::{
+    FlatShape, flatten_block, flatten_expression, flatten_pipeline, flatten_pipeline_element,
+};
+pub use known_external::{KnownExternal, StructuredOutput};
+pub use lex::{
+    LexState, Token, TokenContents, lex, lex_n_tokens, lex_signature, lex_with_delimiter_pairs,
+};
+pub use lite_parser::{LiteBlock, LiteCommand, lite_parse};
+pub use nu_protocol::parser_path::*;
+pub use parse_keywords::*;
+
+pub use parser::{
+    DURATION_UNIT_GROUPS, is_math_expression_like, parse, parse_block, parse_expression,
+    parse_external_call, parse_fresh, parse_shorter_head_reading, parse_unit_value, trim_quotes,
+    trim_quotes_str, unescape_unquote_string,
+};

@@ -1,61 +1,36 @@
-use nu_test_support::fs::Stub::FileWithContentToBeTrimmed;
-use nu_test_support::playground::Playground;
-use nu_test_support::{nu, pipeline};
+use nu_test_support::prelude::*;
+
+const SAMPLE: &str = "[
+    [first_name, last_name];
+    [Andrés, Robalino],
+    [JT, Turner],
+    [Yehuda, Katz]
+]";
 
 #[test]
-fn wrap_rows_into_a_row() {
-    Playground::setup("wrap_test_1", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
-            "los_tres_caballeros.txt",
-            r#"
-                first_name,last_name
-                Andrés,Robalino
-                Jonathan,Turner
-                Yehuda,Katz
-            "#,
-        )]);
+fn wrap_rows_into_a_row() -> Result {
+    let code = "
+        from nuon
+        | wrap caballeros
+        | get caballeros
+        | get 0
+        | get last_name
+    ";
 
-        let actual = nu!(
-            cwd: dirs.test(), pipeline(
-            r#"
-                open los_tres_caballeros.txt
-                | from csv
-                | wrap caballeros
-                | get caballeros
-                | nth 0
-                | get last_name
-            "#
-        ));
-
-        assert_eq!(actual.out, "Robalino");
-    })
+    test()
+        .run_with_data(code, SAMPLE)
+        .expect_value_eq("Robalino")
 }
 
 #[test]
-fn wrap_rows_into_a_table() {
-    Playground::setup("wrap_test_2", |dirs, sandbox| {
-        sandbox.with_files(vec![FileWithContentToBeTrimmed(
-            "los_tres_caballeros.txt",
-            r#"
-                first_name,last_name
-                Andrés,Robalino
-                Jonathan,Turner
-                Yehuda,Katz
-            "#,
-        )]);
+fn wrap_rows_into_a_table() -> Result {
+    let code = "
+        from nuon
+        | get last_name
+        | wrap caballero
+        | get 2
+        | get caballero
+    ";
 
-        let actual = nu!(
-            cwd: dirs.test(), pipeline(
-            r#"
-                open los_tres_caballeros.txt
-                | from csv
-                | get last_name
-                | wrap caballero
-                | nth 2
-                | get caballero
-            "#
-        ));
-
-        assert_eq!(actual.out, "Katz");
-    })
+    test().run_with_data(code, SAMPLE).expect_value_eq("Katz")
 }
